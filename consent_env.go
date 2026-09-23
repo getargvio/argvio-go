@@ -29,11 +29,18 @@ var ciEnvVars = []string{
 // a CI system, based on common CI-provider environment variables.
 func IsCI() bool {
 	for _, name := range ciEnvVars {
-		if v := os.Getenv(name); v != "" && v != "false" && v != "0" {
+		if envTruthy(name) {
 			return true
 		}
 	}
 	return false
+}
+
+// envTruthy reports whether the environment variable name is set to
+// anything other than empty, "false", or "0".
+func envTruthy(name string) bool {
+	v := os.Getenv(name)
+	return v != "" && v != "false" && v != "0"
 }
 
 // IsDoNotTrackRequested reports whether the DO_NOT_TRACK environment

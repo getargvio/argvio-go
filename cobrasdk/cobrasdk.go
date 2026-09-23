@@ -41,16 +41,20 @@ import (
 // docs for how those are populated, typically from the Use and Version
 // fields), then calls InstrumentCobra to wire up automatic capture.
 //
-//	client, err := cobrasdk.Instrument(rootCmd, apiKey)
+//	client, err := cobrasdk.Instrument(rootCmd, apiKey,
+//	    argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
+//	)
 //	if err != nil {
 //	    // client is still safe to use (degrades to no-op); log if you want
 //	}
 //	defer client.Shutdown(context.Background())
 //
-// Any argvio.Option can be passed through, e.g. to set a
-// ConsentProvider or override the endpoint:
+// Any argvio.Option can be passed through, e.g. to set the endpoint
+// (required unless OTEL_EXPORTER_OTLP_ENDPOINT is set) or a
+// ConsentProvider:
 //
 //	client, err := cobrasdk.Instrument(rootCmd, apiKey,
+//	    argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
 //	    argvio.WithConsentProvider(myProvider),
 //	)
 //
