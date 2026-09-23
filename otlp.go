@@ -3,6 +3,8 @@ package argvio
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -70,9 +72,13 @@ func buildExporters(ctx context.Context, cfg *config) (*exporters, error) {
 
 func newTraceExporterGRPC(ctx context.Context, cfg *config, headers map[string]string) (*otlptrace.Exporter, error) {
 	opts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(cfg.endpoint),
 		otlptracegrpc.WithHeaders(headers),
 		otlptracegrpc.WithTimeout(cfg.exportTimeout),
+	}
+	if hasScheme(cfg.endpoint) {
+		opts = append(opts, otlptracegrpc.WithEndpointURL(cfg.endpoint))
+	} else {
+		opts = append(opts, otlptracegrpc.WithEndpoint(cfg.endpoint))
 	}
 	if cfg.insecure {
 		opts = append(opts, otlptracegrpc.WithInsecure())
@@ -82,9 +88,13 @@ func newTraceExporterGRPC(ctx context.Context, cfg *config, headers map[string]s
 
 func newTraceExporterHTTP(ctx context.Context, cfg *config, headers map[string]string) (*otlptrace.Exporter, error) {
 	opts := []otlptracehttp.Option{
-		otlptracehttp.WithEndpoint(cfg.endpoint),
 		otlptracehttp.WithHeaders(headers),
 		otlptracehttp.WithTimeout(cfg.exportTimeout),
+	}
+	if hasScheme(cfg.endpoint) {
+		opts = append(opts, otlptracehttp.WithEndpointURL(strings.TrimSuffix(cfg.endpoint, "/")+"/v1/traces"))
+	} else {
+		opts = append(opts, otlptracehttp.WithEndpoint(cfg.endpoint))
 	}
 	if cfg.insecure {
 		opts = append(opts, otlptracehttp.WithInsecure())
@@ -94,9 +104,13 @@ func newTraceExporterHTTP(ctx context.Context, cfg *config, headers map[string]s
 
 func newMetricExporterGRPC(ctx context.Context, cfg *config, headers map[string]string) (sdkmetric.Exporter, error) {
 	opts := []otlpmetricgrpc.Option{
-		otlpmetricgrpc.WithEndpoint(cfg.endpoint),
 		otlpmetricgrpc.WithHeaders(headers),
 		otlpmetricgrpc.WithTimeout(cfg.exportTimeout),
+	}
+	if hasScheme(cfg.endpoint) {
+		opts = append(opts, otlpmetricgrpc.WithEndpointURL(cfg.endpoint))
+	} else {
+		opts = append(opts, otlpmetricgrpc.WithEndpoint(cfg.endpoint))
 	}
 	if cfg.insecure {
 		opts = append(opts, otlpmetricgrpc.WithInsecure())
@@ -106,9 +120,13 @@ func newMetricExporterGRPC(ctx context.Context, cfg *config, headers map[string]
 
 func newMetricExporterHTTP(ctx context.Context, cfg *config, headers map[string]string) (sdkmetric.Exporter, error) {
 	opts := []otlpmetrichttp.Option{
-		otlpmetrichttp.WithEndpoint(cfg.endpoint),
 		otlpmetrichttp.WithHeaders(headers),
 		otlpmetrichttp.WithTimeout(cfg.exportTimeout),
+	}
+	if hasScheme(cfg.endpoint) {
+		opts = append(opts, otlpmetrichttp.WithEndpointURL(strings.TrimSuffix(cfg.endpoint, "/")+"/v1/metrics"))
+	} else {
+		opts = append(opts, otlpmetrichttp.WithEndpoint(cfg.endpoint))
 	}
 	if cfg.insecure {
 		opts = append(opts, otlpmetrichttp.WithInsecure())
@@ -118,9 +136,13 @@ func newMetricExporterHTTP(ctx context.Context, cfg *config, headers map[string]
 
 func newLogExporterGRPC(ctx context.Context, cfg *config, headers map[string]string) (sdklog.Exporter, error) {
 	opts := []otlploggrpc.Option{
-		otlploggrpc.WithEndpoint(cfg.endpoint),
 		otlploggrpc.WithHeaders(headers),
 		otlploggrpc.WithTimeout(cfg.exportTimeout),
+	}
+	if hasScheme(cfg.endpoint) {
+		opts = append(opts, otlploggrpc.WithEndpointURL(cfg.endpoint))
+	} else {
+		opts = append(opts, otlploggrpc.WithEndpoint(cfg.endpoint))
 	}
 	if cfg.insecure {
 		opts = append(opts, otlploggrpc.WithInsecure())
@@ -130,12 +152,27 @@ func newLogExporterGRPC(ctx context.Context, cfg *config, headers map[string]str
 
 func newLogExporterHTTP(ctx context.Context, cfg *config, headers map[string]string) (sdklog.Exporter, error) {
 	opts := []otlploghttp.Option{
-		otlploghttp.WithEndpoint(cfg.endpoint),
 		otlploghttp.WithHeaders(headers),
 		otlploghttp.WithTimeout(cfg.exportTimeout),
+	}
+	if hasScheme(cfg.endpoint) {
+		opts = append(opts, otlploghttp.WithEndpointURL(strings.TrimSuffix(cfg.endpoint, "/")+"/v1/logs"))
+	} else {
+		opts = append(opts, otlploghttp.WithEndpoint(cfg.endpoint))
 	}
 	if cfg.insecure {
 		opts = append(opts, otlploghttp.WithInsecure())
 	}
 	return otlploghttp.New(ctx, opts...)
+}
+
+// hasScheme reports whether endpoint is a URL (e.g. "https://host:4318",
+// the form OTEL_EXPORTER_OTLP_ENDPOINT uses) rather than a bare
+// host:port. URLs go through the exporters' WithEndpointURL, which
+// derives TLS from the scheme; for HTTP the per-signal path is appended
+// to the base URL, as the OTel spec prescribes for the generic
+// endpoint variable.
+func hasScheme(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

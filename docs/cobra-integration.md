@@ -9,13 +9,17 @@ installed, and a worked multi-command example.
 ## The one-liner
 
 ```go
-client, err := cobrasdk.Instrument(rootCmd, apiKey)
+client, err := cobrasdk.Instrument(rootCmd, apiKey,
+	argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
+)
 ```
 
 This builds an `*argvio.Client` — using `rootCmd.Name()` and
 `rootCmd.Version` for the CLI name/version, so you don't declare them a
 second time — and calls `InstrumentCobra(rootCmd, client)` to wire up
-capture. `argvio.Option`s pass through:
+capture. An endpoint is required — pass `argvio.WithEndpoint` or set
+`OTEL_EXPORTER_OTLP_ENDPOINT`; without one `Instrument` returns a no-op
+client and an error. Other `argvio.Option`s pass through the same way:
 
 ```go
 client, err := cobrasdk.Instrument(rootCmd, apiKey,
@@ -207,7 +211,9 @@ func main() {
 	// Assemble the whole tree BEFORE instrumenting. Instrument's opts are
 	// argvio.Option (endpoint, consent provider, ...); cobrasdk.HookOption
 	// (like WithErrorClassifier below) needs the two-step form instead:
-	client, err := argvio.New(os.Getenv("MYCLI_ARGVIO_KEY"), rootCmd.Name(), rootCmd.Version)
+	client, err := argvio.New(os.Getenv("MYCLI_ARGVIO_KEY"), rootCmd.Name(), rootCmd.Version,
+		argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
+	)
 	cobrasdk.InstrumentCobra(rootCmd, client, cobrasdk.WithErrorClassifier(classifyDeployError))
 	_ = err // client is safe to use even if err != nil
 

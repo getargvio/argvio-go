@@ -28,6 +28,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/getargvio/argvio-go"
 	"github.com/getargvio/argvio-go/cobrasdk"
 	"github.com/spf13/cobra"
 )
@@ -39,7 +40,9 @@ func main() {
 	}
 	// ... add subcommands as usual ...
 
-	client, err := cobrasdk.Instrument(rootCmd, os.Getenv("ARGVIO_API_KEY"))
+	client, err := cobrasdk.Instrument(rootCmd, os.Getenv("ARGVIO_API_KEY"),
+		argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
+	)
 	if err != nil {
 		// client is still safe to use — it degraded to a no-op. Log if you want.
 	}
@@ -65,7 +68,9 @@ it hooks and how to compose it with your own `PersistentPreRunE`/
 ## Quickstart: non-Cobra
 
 ```go
-client, err := argvio.New(apiKey, "mycli", "1.4.0")
+client, err := argvio.New(apiKey, "mycli", "1.4.0",
+	argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
+)
 if err != nil {
 	// still safe to use, degraded to no-op
 }
@@ -104,6 +109,55 @@ at `TierOptIn`). Server-side allowlist stripping is a backstop, not the
 primary mechanism. See [docs/consent.md](docs/consent.md) for the full
 model, how `ConsentProvider` resolves the tier, and how to write your
 own.
+
+## Pointing at a collector
+
+There is no hosted default endpoint — pass `WithEndpoint` explicitly.
+If it's omitted, `New` falls back to the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` environment variable; if that's also
+unset, `New` returns a disabled no-op `Client` alongside a non-nil
+error (same degrade-safe behavior as any other construction failure).
+
+```go
+client, err := argvio.New(apiKey, "mycli", "1.4.0",
+	argvio.WithEndpoint("otel-collector.internal.example.com:4317"),
+)
+```
+
+For a collector running on `localhost` without TLS (e.g. during local
+development), also pass `WithInsecure`:
+
+```go
+client, err := argvio.New(apiKey, "mycli", "1.4.0",
+	argvio.WithEndpoint("localhost:4317"),
+	argvio.WithInsecure(),
+)
+```
+
+`WithEndpoint` also accepts a URL (`https://collector.example.com:4317`),
+the form `OTEL_EXPORTER_OTLP_ENDPOINT` normally uses; an `http://`
+scheme implies `WithInsecure`. If the target only accepts OTLP/HTTP
+rather than gRPC (common behind corporate proxies), add
+`WithHTTPTransport()` and pass a base URL — the per-signal path
+(`/v1/traces`, `/v1/metrics`, `/v1/logs`) is appended for you.
+
+> **Note:** `OTEL_EXPORTER_OTLP_ENDPOINT` is the only `OTEL_*` variable
+> argvio itself reads. The endpoint, auth header, and timeouts are
+> always set explicitly, so your CLI's own OTel configuration can't
+> redirect them. The underlying OTel exporters still apply standard
+> variables for settings argvio leaves unset, such as
+> `OTEL_EXPORTER_OTLP_CERTIFICATE` or `OTEL_EXPORTER_OTLP_COMPRESSION`. If your CLI's
+> environment happens to define `OTEL_EXPORTER_OTLP_ENDPOINT` for that
+> unrelated instrumentation and you don't want it reused here, pass
+> `argvio.WithDisableOTELEnvFallback()` so a missing `WithEndpoint`
+> always fails construction instead of silently picking it up:
+>
+> ```go
+> client, err := argvio.New(apiKey, "mycli", "1.4.0",
+> 	argvio.WithEndpoint(cfg.TelemetryEndpoint), // may be empty
+> 	argvio.WithDisableOTELEnvFallback(),
+> )
+> ```
 
 ## Disabling telemetry
 

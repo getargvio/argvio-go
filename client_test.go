@@ -224,6 +224,77 @@ func TestClientDisabledIsZeroNetworkCalls(t *testing.T) {
 	}
 }
 
+func resourceAttr(srv *fakeotlp.Server, key string) (string, bool) {
+	for _, rm := range srv.Metrics() {
+		for _, kv := range rm.GetResource().GetAttributes() {
+			if kv.GetKey() == key {
+				return kv.GetValue().GetStringValue(), true
+			}
+		}
+	}
+	return "", false
+}
+
+func TestNewWithoutEndpointDegradesToDisabled(t *testing.T) {
+	t.Setenv(otelEndpointEnvVar, "")
+	c, err := New("key", "testcli", "1.0.0")
+	if !errors.Is(err, errNoEndpoint) {
+		t.Fatalf("expected errNoEndpoint, got %v", err)
+	}
+	if c == nil || !c.Disabled() {
+		t.Fatal("New without an endpoint must return a disabled, non-nil client")
+	}
+}
+
+func TestNewFallsBackToOTELEndpointEnv(t *testing.T) {
+	srv, err := fakeotlp.Start()
+	if err != nil {
+		t.Fatalf("starting fake OTLP server: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	// The URL form the OTel spec uses; "http" implies no TLS.
+	t.Setenv(otelEndpointEnvVar, "http://"+srv.Addr())
+
+	c, err := New("key", "testcli", "1.0.0", WithExportTimeout(2*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Shutdown(context.Background()) })
+	c.RecordSessionStart(context.Background())
+	flush(t, c)
+
+	if len(srv.Metrics()) == 0 {
+		t.Fatal("expected telemetry to reach the endpoint from OTEL_EXPORTER_OTLP_ENDPOINT")
+	}
+}
+
+func TestWithDisableOTELEnvFallbackIgnoresEnv(t *testing.T) {
+	t.Setenv(otelEndpointEnvVar, "http://127.0.0.1:1")
+	c, err := New("key", "testcli", "1.0.0", WithDisableOTELEnvFallback())
+	if !errors.Is(err, errNoEndpoint) {
+		t.Fatalf("expected errNoEndpoint, got %v", err)
+	}
+	if !c.Disabled() {
+		t.Fatal("expected a disabled client when the env fallback is turned off")
+	}
+}
+
+func TestHasScheme(t *testing.T) {
+	for endpoint, want := range map[string]bool{
+		"localhost:4317":                  false,
+		"127.0.0.1:4317":                  false,
+		"collector.example.com":           false,
+		"http://localhost:4317":           true,
+		"https://collector.example.com":   true,
+		"https://collector.example.com/":  true,
+		"grpc://collector.example.com:43": false,
+	} {
+		if got := hasScheme(endpoint); got != want {
+			t.Errorf("hasScheme(%q) = %v, want %v", endpoint, got, want)
+		}
+	}
+}
+
 func TestClientDoNotTrackForcesDisabled(t *testing.T) {
 	t.Setenv("DO_NOT_TRACK", "1")
 	c, err := New("key", "testcli", "1.0.0", WithEndpoint("127.0.0.1:1"))

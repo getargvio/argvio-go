@@ -2,12 +2,6 @@ package argvio
 
 import "time"
 
-// defaultEndpoint is the hosted public ingest endpoint. Overridden by
-// WithEndpoint for self-hosted/on-prem deployments.
-//
-// TODO(schema): confirm the production hostname; this is a placeholder.
-const defaultEndpoint = "ingest.argvio.io:4317"
-
 // defaultAuthHeader is the metadata/header key the api key is sent
 // under.
 //
@@ -33,6 +27,8 @@ type config struct {
 	defaultTier Tier
 	consent     ConsentProvider
 
+	disableOTELEnvFallback bool
+
 	exportTimeout   time.Duration
 	shutdownTimeout time.Duration
 	queueSize       int
@@ -49,7 +45,6 @@ func newConfig(apiKey, cliName, cliVersion string) *config {
 		apiKey:          apiKey,
 		cliName:         cliName,
 		cliVersion:      cliVersion,
-		endpoint:        defaultEndpoint,
 		authHeader:      defaultAuthHeader,
 		defaultTier:     TierAnonymous,
 		exportTimeout:   defaultExportTimeout,
@@ -61,11 +56,37 @@ func newConfig(apiKey, cliName, cliVersion string) *config {
 // Option configures a Client constructed by New.
 type Option func(*config)
 
-// WithEndpoint overrides the OTLP collector endpoint (host:port for
-// gRPC, or a base URL for HTTP — see WithHTTPTransport). Defaults to
-// the hosted public endpoint.
+// WithEndpoint sets the OTLP collector endpoint: either a bare
+// host:port, or a URL such as "https://collector.example.com:4318"
+// whose scheme selects TLS ("http" implies insecure). With
+// WithHTTPTransport a URL is treated as a base URL and the per-signal
+// path (/v1/traces etc.) is appended. If omitted, New
+// falls back to the standard OTEL_EXPORTER_OTLP_ENDPOINT environment
+// variable (see otelEndpointEnvVar and WithDisableOTELEnvFallback); if
+// that is also unset, New returns a disabled no-op Client with a
+// non-nil error.
 func WithEndpoint(endpoint string) Option {
 	return func(c *config) { c.endpoint = endpoint }
+}
+
+// otelEndpointEnvVar is the standard OpenTelemetry environment
+// variable consulted as a fallback when WithEndpoint isn't passed.
+// It is the only OTEL_* variable argvio itself reads, since a CLI's
+// process environment may carry an OTel setup for the CLI's own
+// instrumentation that is unrelated to this SDK's telemetry. The
+// underlying OTel exporters still honor their standard variables (e.g.
+// OTEL_EXPORTER_OTLP_CERTIFICATE, OTEL_EXPORTER_OTLP_COMPRESSION) for
+// any setting argvio doesn't pass explicitly; the endpoint, headers,
+// and timeout are always set explicitly and never taken from them.
+const otelEndpointEnvVar = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+// WithDisableOTELEnvFallback turns off the OTEL_EXPORTER_OTLP_ENDPOINT
+// environment fallback described on WithEndpoint. Use this when the
+// host CLI's environment may define that variable for its own,
+// unrelated OTel setup and an explicit WithEndpoint should be the only
+// way to configure this SDK's exporters.
+func WithDisableOTELEnvFallback() Option {
+	return func(c *config) { c.disableOTELEnvFallback = true }
 }
 
 // WithInsecure disables transport security. Only intended for local
@@ -160,6 +181,32 @@ func WithResourceAttribute(key, value string) Option {
 	return func(c *config) {
 		if key != "" {
 			c.extraResourceAttrs = append(c.extraResourceAttrs, keyValue{key, value})
+		}
+	}
+}
+
+// Resource attribute keys set by WithCommit and WithBuildDate.
+const (
+	ResourceAttrVCSRevision = "vcs.repository.ref.revision"
+	ResourceAttrBuildDate   = "service.build.date"
+)
+
+// WithCommit attaches the VCS revision (e.g. a git commit SHA) the CLI
+// was built from, as a resource attribute. A blank commit is a no-op.
+func WithCommit(commit string) Option {
+	return func(c *config) {
+		if commit != "" {
+			c.extraResourceAttrs = append(c.extraResourceAttrs, keyValue{ResourceAttrVCSRevision, commit})
+		}
+	}
+}
+
+// WithBuildDate attaches the CLI's build date as a resource attribute.
+// A blank date is a no-op.
+func WithBuildDate(date string) Option {
+	return func(c *config) {
+		if date != "" {
+			c.extraResourceAttrs = append(c.extraResourceAttrs, keyValue{ResourceAttrBuildDate, date})
 		}
 	}
 }

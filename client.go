@@ -54,8 +54,10 @@ type Client struct {
 }
 
 // New constructs a Client. apiKey, cliName, and cliVersion are always
-// required; everything else has a sane default and is set via Option
-// (WithEndpoint, WithConsentProvider, WithDisabled, etc).
+// required, as is a collector endpoint — via WithEndpoint or the
+// OTEL_EXPORTER_OTLP_ENDPOINT fallback described there. Everything else
+// has a sane default and is set via Option (WithConsentProvider,
+// WithDisabled, etc).
 //
 // New never panics and never returns a nil *Client. If construction
 // encounters a problem (e.g. the exporter transport can't be built), it
@@ -78,6 +80,16 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 
 	if cfg.disabled || os.Getenv("ARGVIO_DISABLED") == "1" || IsDoNotTrackRequested() {
 		return disabledClient(), nil
+	}
+
+	if cfg.endpoint == "" && !cfg.disableOTELEnvFallback {
+		cfg.endpoint = os.Getenv(otelEndpointEnvVar)
+	}
+	if cfg.endpoint == "" {
+		return disabledClient(), errNoEndpoint
+	}
+	if info, ok := DetectCI(); ok {
+		cfg.extraResourceAttrs = append(cfg.extraResourceAttrs, info.resourceAttributes()...)
 	}
 
 	tier := resolveConsentTier(cfg)
