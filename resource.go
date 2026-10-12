@@ -2,6 +2,7 @@ package argvio
 
 import (
 	"context"
+	"runtime"
 	"runtime/debug"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -37,7 +38,11 @@ func buildResource(cfg *config) *resource.Resource {
 		attribute.String("telemetry.sdk.name", "argvio-go"),
 		attribute.String("telemetry.sdk.version", sdkVersion()),
 		attribute.String("telemetry.sdk.language", "go"),
+		attribute.String(ResourceAttrCLIVersion, cfg.cliVersion),
+		attribute.String(ResourceAttrOS, normalizeOS(runtime.GOOS)),
+		attribute.String(ResourceAttrArch, normalizeArch(runtime.GOARCH)),
 	}
+	attrs = append(attrs, cfg.ci.resourceAttributes()...)
 	for _, kv := range cfg.extraResourceAttrs {
 		attrs = append(attrs, attribute.String(kv.key, kv.value))
 	}
@@ -49,4 +54,32 @@ func buildResource(cfg *config) *resource.Resource {
 		return resource.NewSchemaless(attrs...)
 	}
 	return res
+}
+
+// Resource attribute keys describing the CLI build and host, promoted by
+// the server into filterable columns.
+const (
+	ResourceAttrCLIVersion = "cli.version"
+	ResourceAttrOS         = "cli.os"
+	ResourceAttrArch       = "cli.arch"
+)
+
+// normalizeOS maps runtime.GOOS onto the server's cli.os enum.
+func normalizeOS(goos string) string {
+	switch goos {
+	case "linux", "darwin", "windows":
+		return goos
+	default:
+		return "other"
+	}
+}
+
+// normalizeArch maps runtime.GOARCH onto the server's cli.arch enum.
+func normalizeArch(goarch string) string {
+	switch goarch {
+	case "amd64", "arm64", "386", "arm":
+		return goarch
+	default:
+		return "other"
+	}
 }

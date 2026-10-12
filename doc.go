@@ -4,7 +4,7 @@
 // client side rather than trusting server-side stripping alone.
 //
 // Vendors interact with it through a fixed taxonomy of Record*
-// functions on Client (RecordCommandInvocation, RecordExitCode,
+// functions on Client (RecordCommandInvocation, RecordCommand,
 // RecordError, ...) instead of a free-form attribute bag, so it is
 // structurally difficult to accidentally emit a field above what the
 // resolved consent tier allows. See docs/consent.md in the module root

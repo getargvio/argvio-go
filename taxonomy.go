@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // This file implements the taxonomy: the fixed, typed set of Record*
@@ -17,30 +20,50 @@ import (
 // of the consent model; server-side allowlist stripping is a backstop,
 // not the primary mechanism (see docs/consent.md).
 //
-// TODO(schema): the exact attribute keys and per-tier field boundaries
-// below mirror what was specified when this SDK was scaffolded. They
-// must be checked against the authoritative server-side allowlist file
-// before v0.1.0 ships, and updated here deliberately (never inferred at
-// runtime) if the schema differs. See CONTRIBUTING.md.
+// Every event, span, metric and attribute name below is taken from the
+// `public` server's allowlist (schema/allowlist/v1.yaml in
+// getargvio/argvio), which rejects anything else. Change them only
+// together with a server-side schema version — see CONTRIBUTING.md.
 
 // Attribute keys used on emitted signals. Exported so vendors and tests
 // can assert on them without relying on string literals staying in
 // sync.
 const (
-	AttrCommandPath   = "cli.command.path"
-	AttrCommandFlags  = "cli.command.flags"
-	AttrExitCode      = "cli.command.exit_code"
-	AttrHelpUsed      = "cli.command.help_used"
-	AttrSessionID     = "cli.session.id"
-	AttrErrorCategory = "cli.error.category"
-	AttrErrorMessage  = "cli.error.message" // TierOptIn only
-	AttrErrorStack    = "cli.error.stack"   // TierOptIn only
+	AttrCommandName  = "cli.command.name"
+	AttrExitCode     = "cli.command.exit_code"
+	AttrDurationMs   = "cli.command.duration_ms"
+	AttrFlagNames    = "cli.flag.names" // TierBasic+
+	AttrSessionID    = "cli.session_id" // TierBasic+
+	AttrInstallID    = "cli.install_id" // TierBasic+
+	AttrHelpFlag     = "cli.help.flag"
+	AttrErrorType    = "cli.error.type"       // TierFull+
+	AttrErrorMessage = "cli.error.message"    // TierOptIn only
+	AttrErrorStack   = "cli.error.stacktrace" // TierOptIn only
 )
 
-// MetricCommandDuration is the name of the histogram instrument
-// RecordLatency records to (unit: milliseconds), for vendors or tests
-// that want to reference it without a string literal.
-const MetricCommandDuration = "cli.command.duration"
+// Log event names.
+const (
+	EventSessionStarted = "cli.session.started"
+	EventCommandInvoked = "cli.command.invoked"
+	EventHelpViewed     = "cli.help.viewed"
+	EventErrorRaised    = "cli.error.raised"
+)
+
+// SpanCommandPrefix prefixes the name of the span RecordCommand emits
+// for each command (e.g. "cli.command.deploy.push"). The server's
+// command dashboards (frequency, latency, error rate, exit codes) are
+// built from these spans.
+const SpanCommandPrefix = "cli.command."
+
+// Metric instrument names.
+const (
+	MetricCommandInvocations = "cli.command.invocations"
+	MetricCommandDuration    = "cli.command.duration" // milliseconds
+	MetricErrors             = "cli.errors"
+)
+
+// maxCommandNameLength is the server's max_length for cli.command.name.
+const maxCommandNameLength = 128
 
 // ErrorCategory is a coarse, vendor-assigned classification of an error
 // — deliberately not the error's message or type name, both of which
@@ -70,6 +93,29 @@ func (c ErrorCategory) valid() bool {
 	default:
 		return false
 	}
+}
+
+// commandName converts a command path as the CLI framework reports it
+// ("mycli deploy push") into the dotted cli.command.name the server
+// expects ("deploy.push"). The CLI's own name is dropped, since every
+// record already carries it as service.name, except for the root command
+// itself, which keeps it so it still has a name.
+func (c *Client) commandName(commandPath string) string {
+	parts := strings.Fields(commandPath)
+	if len(parts) > 1 && parts[0] == c.cliName {
+		parts = parts[1:]
+	}
+	name := strings.Join(parts, ".")
+	if name == "" {
+		name = c.cliName
+	}
+	if name == "" {
+		name = "root"
+	}
+	if len(name) > maxCommandNameLength {
+		name = name[:maxCommandNameLength]
+	}
+	return name
 }
 
 func newSessionID() string {
@@ -102,25 +148,27 @@ func (c *Client) gate(required Tier) bool {
 
 func (c *Client) emitEvent(ctx context.Context, name string, sev otellog.Severity, attrs ...attribute.KeyValue) {
 	c.dispatch(func() {
-		var rec otellog.Record
-		rec.SetTimestamp(time.Now())
-		rec.SetEventName(name)
-		rec.SetSeverity(sev)
-		rec.AddAttributes(c.tierAttr())
-		rec.AddAttributes(attrs...)
-		c.logger.Emit(ctx, rec)
+		c.emitEventNow(ctx, name, sev, attrs...)
 	})
+}
+
+func (c *Client) emitEventNow(ctx context.Context, name string, sev otellog.Severity, attrs ...attribute.KeyValue) {
+	var rec otellog.Record
+	rec.SetTimestamp(time.Now())
+	rec.SetEventName(name)
+	rec.SetSeverity(sev)
+	rec.AddAttributes(c.tierAttr())
+	rec.AddAttributes(attrs...)
+	c.logger.Emit(ctx, rec)
 }
 
 // --- Session ---------------------------------------------------------
 
 // ensureSessionID lazily generates a session correlation ID at
-// TierFull+ (see TierFull's doc comment: session correlation is a
-// Full-tier capability). It is a random, non-persistent identifier
-// scoped to a single process invocation — not a user or device
-// identifier.
+// TierBasic+. It is a random, non-persistent identifier scoped to a
+// single process invocation — not a user or device identifier.
 func (c *Client) ensureSessionID() string {
-	if !c.tier.Allows(TierFull) {
+	if !c.tier.Allows(TierBasic) {
 		return ""
 	}
 	if p := c.sessionID.Load(); p != nil {
@@ -134,124 +182,123 @@ func (c *Client) ensureSessionID() string {
 	return id
 }
 
-// RecordSessionStart records the start of a CLI process session. Call
-// once, as early as possible (e.g. in your root command's
-// PersistentPreRunE, or main() for non-Cobra CLIs). Safe to call on a
-// nil or disabled Client.
+// RecordSessionStart records the start of a CLI process session, which
+// is what the server counts sessions, active installs and retention
+// from. Call it as early as possible (cobrasdk does it for you); only the
+// first call per Client emits anything, so calling it from several entry
+// points is fine. Safe to call on a nil or disabled Client.
 //
-// At TierAnonymous this only increments an aggregate session counter.
-// At TierBasic+ it also emits a session_start event. At TierFull+ the
-// event carries a per-process session correlation ID (see AttrSessionID).
+// At TierAnonymous the event carries no identifiers. At TierBasic+ it
+// also carries the per-process session ID and the install ID (see
+// AttrInstallID), a random UUID persisted in the CLI's config directory
+// the first time it is needed — never derived from the user or machine.
 func (c *Client) RecordSessionStart(ctx context.Context) {
 	defer recoverGuard(nil)
-	if !c.enabled() {
+	if !c.enabled() || !c.sessionOn.CompareAndSwap(false, true) {
 		return
 	}
+	sessionID := c.ensureSessionID()
+	basic := c.tier.Allows(TierBasic)
 	c.dispatch(func() {
-		c.sessions.Add(ctx, 1, metric.WithAttributes(c.tierAttr()))
+		var attrs []attribute.KeyValue
+		if sessionID != "" {
+			attrs = append(attrs, attribute.String(AttrSessionID, sessionID))
+		}
+		if basic {
+			if id := loadOrCreateInstallID(c.installIDPath); id != "" {
+				attrs = append(attrs, attribute.String(AttrInstallID, id))
+			}
+		}
+		c.emitEventNow(ctx, EventSessionStarted, otellog.SeverityInfo1, attrs...)
 	})
-	if !c.tier.Allows(TierBasic) {
-		return
-	}
-	attrs := []attribute.KeyValue{}
-	if id := c.ensureSessionID(); id != "" {
-		attrs = append(attrs, attribute.String(AttrSessionID, id))
-	}
-	c.emitEvent(ctx, "cli.session_start", otellog.SeverityInfo1, attrs...)
 }
 
-// RecordSessionEnd records the end of a CLI process session. Call once,
-// symmetric with RecordSessionStart (e.g. root command's
-// PersistentPostRunE, or a deferred call in main()). Safe to call on a
-// nil or disabled Client.
-func (c *Client) RecordSessionEnd(ctx context.Context) {
-	defer recoverGuard(nil)
-	if !c.enabled() || !c.tier.Allows(TierBasic) {
-		return
-	}
-	attrs := []attribute.KeyValue{}
-	if id := c.ensureSessionID(); id != "" {
-		attrs = append(attrs, attribute.String(AttrSessionID, id))
-	}
-	c.emitEvent(ctx, "cli.session_end", otellog.SeverityInfo1, attrs...)
-}
-
-// --- Command invocation ------------------------------------------------
+// --- Commands --------------------------------------------------------
 
 // RecordCommandInvocation records that a command began executing.
 // commandPath should be the full command path (e.g. cmd.CommandPath()
-// in Cobra: "mycli sub subsub"), not just the leaf command name.
-// flagNames is the list of flag *names* the user set — never flag
-// values, which this SDK never accepts anywhere in the taxonomy (flag
-// values are arbitrary free-form input this package deliberately does
-// not try to inspect or redact; see the package's PII-scrubbing
-// non-goal).
+// in Cobra: "mycli sub subsub"); it is reported as the dotted command
+// name ("sub.subsub"). flagNames is the list of flag *names* the user set
+// — never flag values, which this SDK never accepts anywhere in the
+// taxonomy (flag values are arbitrary free-form input this package
+// deliberately does not try to inspect or redact; see the package's
+// PII-scrubbing non-goal).
 //
-// At TierAnonymous this only increments an aggregate invocation
-// counter with no path/flag detail. At TierBasic+ the full command path
-// and flag names are included.
+// The command name is recorded at every tier; flag names and the session
+// ID at TierBasic+.
 func (c *Client) RecordCommandInvocation(ctx context.Context, commandPath string, flagNames []string) {
 	defer recoverGuard(nil)
 	if !c.enabled() {
 		return
 	}
-	c.dispatch(func() {
-		c.invocations.Add(ctx, 1, metric.WithAttributes(c.tierAttr()))
-	})
-	if !c.tier.Allows(TierBasic) {
-		return
+	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, c.commandName(commandPath))}
+	if c.tier.Allows(TierBasic) {
+		if len(flagNames) > 0 {
+			attrs = append(attrs, attribute.StringSlice(AttrFlagNames, flagNames))
+		}
+		if id := c.ensureSessionID(); id != "" {
+			attrs = append(attrs, attribute.String(AttrSessionID, id))
+		}
 	}
-	attrs := []attribute.KeyValue{attribute.String(AttrCommandPath, commandPath)}
-	if len(flagNames) > 0 {
-		attrs = append(attrs, attribute.StringSlice(AttrCommandFlags, flagNames))
-	}
-	c.emitEvent(ctx, "cli.command_invocation", otellog.SeverityInfo1, attrs...)
+	c.emitEvent(ctx, EventCommandInvoked, otellog.SeverityInfo1, attrs...)
 }
 
-// RecordExitCode records the exit code a command finished with.
-// commandPath identifies which command this applies to and should
-// match the value passed to RecordCommandInvocation; pass "" if
-// unknown (e.g. a non-Cobra CLI with a single implicit command).
-//
-// At TierAnonymous the exit code is recorded without a command path
-// (aggregate success/failure counts only). At TierBasic+ the command
-// path is included.
-func (c *Client) RecordExitCode(ctx context.Context, commandPath string, code int) {
-	defer recoverGuard(nil)
-	if !c.gate(TierAnonymous) {
-		return
-	}
-	attrs := []attribute.KeyValue{attribute.Int(AttrExitCode, code)}
-	if c.tier.Allows(TierBasic) && commandPath != "" {
-		attrs = append(attrs, attribute.String(AttrCommandPath, commandPath))
-	}
-	sev := otellog.SeverityInfo1
-	if code != 0 {
-		sev = otellog.SeverityWarn1
-	}
-	c.emitEvent(ctx, "cli.exit_code", sev, attrs...)
+// CommandResult describes one completed command, for RecordCommand.
+type CommandResult struct {
+	// Path is the full command path, as for RecordCommandInvocation.
+	Path string
+	// FlagNames are the names (never values) of the flags the user set.
+	// Only sent at TierBasic+.
+	FlagNames []string
+	// Start is when the command began. Zero means Duration before now.
+	Start time.Time
+	// Duration is how long the command ran.
+	Duration time.Duration
+	// ExitCode is the command's exit code; non-zero counts as an error.
+	ExitCode int
 }
 
-// RecordLatency records how long a command took to execute. commandPath
-// identifies which command this applies to; pass "" for a whole-session
-// duration or a single-command CLI. d is recorded in milliseconds on a
-// histogram (cli.command.duration), suitable for percentile queries
-// server-side.
+// RecordCommand records a completed command: a cli.command.<name> span
+// covering its execution, plus the cli.command.invocations and
+// cli.command.duration metrics. This is what the server's command
+// frequency, latency, error-rate and exit-code dashboards are built
+// from, so call it once for every command that ran (cobrasdk does).
 //
-// Available at every tier: a duration by itself, without a command
-// path, carries no more information than "some command took Xms" (the
-// command path attribute itself is still gated to TierBasic+).
-func (c *Client) RecordLatency(ctx context.Context, commandPath string, d time.Duration) {
+// Available at every tier; flag names are only attached at TierBasic+.
+func (c *Client) RecordCommand(ctx context.Context, r CommandResult) {
 	defer recoverGuard(nil)
-	if !c.gate(TierAnonymous) {
+	if !c.enabled() {
 		return
 	}
-	attrs := []attribute.KeyValue{c.tierAttr()}
-	if c.tier.Allows(TierBasic) && commandPath != "" {
-		attrs = append(attrs, attribute.String(AttrCommandPath, commandPath))
+	if r.Duration < 0 {
+		r.Duration = 0
+	}
+	start := r.Start
+	if start.IsZero() {
+		start = time.Now().Add(-r.Duration)
+	}
+	name := c.commandName(r.Path)
+	attrs := []attribute.KeyValue{
+		c.tierAttr(),
+		attribute.String(AttrCommandName, name),
+		attribute.Int(AttrExitCode, r.ExitCode),
+	}
+	spanAttrs := append(append([]attribute.KeyValue{}, attrs...), attribute.Int64(AttrDurationMs, r.Duration.Milliseconds()))
+	if c.tier.Allows(TierBasic) && len(r.FlagNames) > 0 {
+		spanAttrs = append(spanAttrs, attribute.StringSlice(AttrFlagNames, r.FlagNames))
 	}
 	c.dispatch(func() {
-		c.latencyHist.Record(ctx, float64(d.Milliseconds()), metric.WithAttributes(attrs...))
+		_, span := c.tracer.Start(ctx, SpanCommandPrefix+name,
+			trace.WithTimestamp(start),
+			trace.WithAttributes(spanAttrs...),
+		)
+		if r.ExitCode != 0 {
+			span.SetStatus(codes.Error, "")
+		}
+		span.End(trace.WithTimestamp(start.Add(r.Duration)))
+
+		c.invocations.Add(ctx, 1, metric.WithAttributes(attrs...))
+		c.latencyHist.Record(ctx, float64(r.Duration.Microseconds())/1000, metric.WithAttributes(attrs...))
 	})
 }
 
@@ -262,11 +309,10 @@ func (c *Client) RecordHelpFlagUsage(ctx context.Context, commandPath string) {
 	if !c.gate(TierAnonymous) {
 		return
 	}
-	attrs := []attribute.KeyValue{attribute.Bool(AttrHelpUsed, true)}
-	if c.tier.Allows(TierBasic) && commandPath != "" {
-		attrs = append(attrs, attribute.String(AttrCommandPath, commandPath))
-	}
-	c.emitEvent(ctx, "cli.help_flag_used", otellog.SeverityInfo1, attrs...)
+	c.emitEvent(ctx, EventHelpViewed, otellog.SeverityInfo1,
+		attribute.String(AttrCommandName, c.commandName(commandPath)),
+		attribute.String(AttrHelpFlag, "help"),
+	)
 }
 
 // --- Errors --------------------------------------------------------
@@ -279,26 +325,29 @@ func (c *Client) RecordHelpFlagUsage(ctx context.Context, commandPath string) {
 // only reachable via Client.OptIn(), which itself only returns a usable
 // recorder when the resolved tier is actually TierOptIn.
 //
-// Requires TierFull+; at lower tiers this is a no-op (counted in
-// Stats().BelowTierDropped).
+// At every tier this counts the error on the cli.errors metric by
+// command. At TierFull+ the category is attached as the error type and a
+// cli.error.raised event is emitted too.
 func (c *Client) RecordError(ctx context.Context, commandPath string, category ErrorCategory) {
 	defer recoverGuard(nil)
-	if !c.gate(TierFull) {
+	if !c.enabled() {
 		return
 	}
 	if !category.valid() {
 		category = ErrorCategoryUnknown
 	}
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrErrorCategory, string(category)),
+	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, c.commandName(commandPath))}
+	if c.tier.Allows(TierFull) {
+		attrs = append(attrs, attribute.String(AttrErrorType, string(category)))
 	}
-	if commandPath != "" {
-		attrs = append(attrs, attribute.String(AttrCommandPath, commandPath))
-	}
+	metricAttrs := append([]attribute.KeyValue{c.tierAttr()}, attrs...)
 	c.dispatch(func() {
-		c.errorEvents.Add(ctx, 1, metric.WithAttributes(c.tierAttr(), attribute.String(AttrErrorCategory, string(category))))
+		c.errorEvents.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
 	})
-	c.emitEvent(ctx, "cli.error", otellog.SeverityError1, attrs...)
+	if !c.tier.Allows(TierFull) {
+		return
+	}
+	c.emitEvent(ctx, EventErrorRaised, otellog.SeverityError1, attrs...)
 }
 
 // OptInScope exposes telemetry capabilities that require the user's
@@ -344,12 +393,10 @@ func (s *OptInScope) RecordErrorDetail(ctx context.Context, commandPath string, 
 		return
 	}
 	attrs := []attribute.KeyValue{
+		attribute.String(AttrCommandName, c.commandName(commandPath)),
 		attribute.String(AttrErrorMessage, err.Error()),
 	}
-	if commandPath != "" {
-		attrs = append(attrs, attribute.String(AttrCommandPath, commandPath))
-	}
-	c.emitEvent(ctx, "cli.error_detail", otellog.SeverityError1, attrs...)
+	c.emitEvent(ctx, EventErrorRaised, otellog.SeverityError1, attrs...)
 }
 
 // RecordErrorDetailWithStack is identical to RecordErrorDetail but also
@@ -366,13 +413,11 @@ func (s *OptInScope) RecordErrorDetailWithStack(ctx context.Context, commandPath
 		return
 	}
 	attrs := []attribute.KeyValue{
+		attribute.String(AttrCommandName, c.commandName(commandPath)),
 		attribute.String(AttrErrorMessage, err.Error()),
-	}
-	if commandPath != "" {
-		attrs = append(attrs, attribute.String(AttrCommandPath, commandPath))
 	}
 	if len(stack) > 0 {
 		attrs = append(attrs, attribute.String(AttrErrorStack, string(stack)))
 	}
-	c.emitEvent(ctx, "cli.error_detail", otellog.SeverityError1, attrs...)
+	c.emitEvent(ctx, EventErrorRaised, otellog.SeverityError1, attrs...)
 }

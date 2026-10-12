@@ -16,6 +16,7 @@ import (
 	collogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	cotrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -168,4 +169,43 @@ func (s *Server) Reset() {
 	s.metrics = nil
 	s.logs = nil
 	s.headers = nil
+}
+
+// Span returns the first exported span named name, or nil.
+func (s *Server) Span(name string) *tracepb.Span {
+	for _, rs := range s.Traces() {
+		for _, ss := range rs.GetScopeSpans() {
+			for _, span := range ss.GetSpans() {
+				if span.GetName() == name {
+					return span
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// LogRecord returns the first exported log record with the given event
+// name, or nil.
+func (s *Server) LogRecord(eventName string) *logspb.LogRecord {
+	for _, rl := range s.Logs() {
+		for _, sl := range rl.GetScopeLogs() {
+			for _, rec := range sl.GetLogRecords() {
+				if rec.GetEventName() == eventName {
+					return rec
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Attr returns the value of key in kvs, or nil.
+func Attr(kvs []*commonpb.KeyValue, key string) *commonpb.AnyValue {
+	for _, kv := range kvs {
+		if kv.GetKey() == key {
+			return kv.GetValue()
+		}
+	}
+	return nil
 }
