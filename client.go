@@ -56,6 +56,9 @@ type Client struct {
 	sessionID atomic.Pointer[string]
 	sessionOn atomic.Bool
 
+	currentCommand atomic.Pointer[string]
+	activated      sync.Map
+
 	exportTimeout   time.Duration
 	shutdownTimeout time.Duration
 }

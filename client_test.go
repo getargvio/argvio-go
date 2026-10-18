@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -479,6 +480,128 @@ func TestClientDoNotTrackForcesDisabled(t *testing.T) {
 	}
 }
 
+func countEvents(srv *fakeotlp.Server, name string) int {
+	n := 0
+	for _, got := range allLogEventNames(srv) {
+		if got == name {
+			n++
+		}
+	}
+	return n
+}
+
+func TestClientFeatureActivatedAtBasicTier(t *testing.T) {
+	c, srv := newTestClient(t, TierBasic)
+	ctx := context.Background()
+
+	c.RecordSessionStart(ctx)
+	c.RecordCommandInvocation(ctx, "testcli deploy push", nil)
+	c.RecordFeatureActivated(ctx, "dry-run")
+	flush(t, c)
+
+	if got, ok := logAttr(srv, EventFeatureActivated, AttrFeature); !ok || got != "dry-run" {
+		t.Fatalf("feature = (%q, %v), want dry-run", got, ok)
+	}
+	if got, _ := logAttr(srv, EventFeatureActivated, AttrCommandName); got != "deploy.push" {
+		t.Fatalf("command name = %q, want deploy.push", got)
+	}
+	installID, _ := logAttr(srv, EventSessionStarted, AttrInstallID)
+	sessionID, _ := logAttr(srv, EventSessionStarted, AttrSessionID)
+	if got, _ := logAttr(srv, EventFeatureActivated, AttrInstallID); got == "" || got != installID {
+		t.Fatalf("install ID = %q, want %q", got, installID)
+	}
+	if got, _ := logAttr(srv, EventFeatureActivated, AttrSessionID); got == "" || got != sessionID {
+		t.Fatalf("session ID = %q, want %q", got, sessionID)
+	}
+	if got, _ := logAttr(srv, EventFeatureActivated, ResourceAttrTier); got != "basic" {
+		t.Fatalf("tier = %q, want basic", got)
+	}
+}
+
+func TestClientFeatureActivatedWithoutKnownCommand(t *testing.T) {
+	c, srv := newTestClient(t, TierBasic)
+	c.RecordFeatureActivated(context.Background(), "dry-run")
+	flush(t, c)
+
+	if countEvents(srv, EventFeatureActivated) != 1 {
+		t.Fatal("expected the event even when no command is known")
+	}
+	if _, ok := logAttr(srv, EventFeatureActivated, AttrCommandName); ok {
+		t.Fatal("command name must be absent when no command was recorded")
+	}
+}
+
+func TestClientFeatureActivatedGatedByTier(t *testing.T) {
+	c, srv := newTestClient(t, TierAnonymous)
+	c.RecordFeatureActivated(context.Background(), "dry-run")
+	flush(t, c)
+
+	if n := countEvents(srv, EventFeatureActivated); n != 0 {
+		t.Fatalf("TierAnonymous must not emit cli.feature.activated, got %d", n)
+	}
+	if got := c.Stats().BelowTierDropped; got != 1 {
+		t.Fatalf("expected the drop to be counted, got %d", got)
+	}
+
+	for _, tier := range []Tier{TierFull, TierOptIn} {
+		c, srv := newTestClient(t, tier)
+		c.RecordFeatureActivated(context.Background(), "dry-run")
+		flush(t, c)
+		if n := countEvents(srv, EventFeatureActivated); n != 1 {
+			t.Fatalf("%s: expected one event, got %d", tier, n)
+		}
+	}
+}
+
+func TestClientFeatureActivatedEmitsOncePerFeature(t *testing.T) {
+	c, srv := newTestClient(t, TierBasic)
+	ctx := context.Background()
+
+	c.RecordFeatureActivated(ctx, "dry-run")
+	c.RecordFeatureActivated(ctx, "dry-run")
+	c.RecordFeatureActivated(ctx, "watch")
+	flush(t, c)
+
+	if n := countEvents(srv, EventFeatureActivated); n != 2 {
+		t.Fatalf("expected one event per distinct feature, got %d", n)
+	}
+}
+
+func TestClientFeatureActivatedBoundsAndIgnoresEmpty(t *testing.T) {
+	c, srv := newTestClient(t, TierBasic)
+	ctx := context.Background()
+
+	c.RecordFeatureActivated(ctx, "")
+	c.RecordFeatureActivated(ctx, strings.Repeat("a", 200))
+	flush(t, c)
+
+	if n := countEvents(srv, EventFeatureActivated); n != 1 {
+		t.Fatalf("expected the empty feature to be ignored, got %d events", n)
+	}
+	if got, _ := logAttr(srv, EventFeatureActivated, AttrFeature); len(got) != maxFeatureLength {
+		t.Fatalf("feature length = %d, want %d", len(got), maxFeatureLength)
+	}
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	cases := []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"abc", 5, "abc"},
+		{"abcdef", 3, "abc"},
+		{"aé", 2, "a"}, // é is two bytes; cutting at 2 would split it
+		{"éé", 4, "éé"},
+		{"日本", 4, "日"},
+	}
+	for _, tc := range cases {
+		if got := truncateUTF8(tc.in, tc.max); got != tc.want {
+			t.Errorf("truncateUTF8(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+		}
+	}
+}
+
 func TestNilClientMethodsNeverPanic(t *testing.T) {
 	var c *Client
 	ctx := context.Background()
@@ -494,6 +617,7 @@ func TestNilClientMethodsNeverPanic(t *testing.T) {
 	c.RecordCommand(ctx, CommandResult{Path: "x", ExitCode: 1})
 	c.RecordHelpFlagUsage(ctx, "x")
 	c.RecordError(ctx, "x", ErrorCategoryUnknown)
+	c.RecordFeatureActivated(ctx, "x")
 	_ = c.Tier()
 	_ = c.Disabled()
 	_ = c.Stats()
