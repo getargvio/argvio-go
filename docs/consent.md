@@ -65,6 +65,13 @@ Also adds:
   `"deploy.dry-run"`), never anything derived from user input. It is cut to
   64 bytes, and each distinct feature is sent at most once per process; the
   server works out an install's first use of a feature itself.
+- `RecordCommand` adds the process's resource usage to the
+  `cli.command.<name>` span: `cli.process.peak_rss_bytes` (peak resident
+  memory, in bytes) and `cli.process.cpu_time_ms` (user plus system CPU
+  time, in milliseconds). Nothing is sent for these at `TierAnonymous`, and
+  the OS counters are not even read there. They are not on the
+  `cli.command.completed` event. See
+  [Process resource usage](#process-resource-usage) below.
 - `RecordError` starts emitting a `cli.error.raised` event: category
   (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
   a message or stack trace — see TierOptIn.
@@ -93,6 +100,30 @@ no other function anywhere in this package that accepts a raw error
 message or stack trace. This is deliberate: it should be structurally
 impossible for a `RecordError` call site written against a lower tier
 to accidentally leak detail, not just a runtime check.
+
+## Process resource usage
+
+At `TierBasic` and above, `RecordCommand` reads the process's resource
+counters once, when it is called, and attaches two integers to the command
+span so vendors can spot memory and CPU regressions between releases:
+
+| Attribute | Meaning | Unit |
+|---|---|---|
+| `cli.process.peak_rss_bytes` | Peak resident set size | bytes |
+| `cli.process.cpu_time_ms` | User plus system CPU time | milliseconds |
+
+They are read with `getrusage(RUSAGE_SELF)` (no cgo, no sampling thread,
+no allocation) on Linux, macOS, FreeBSD, NetBSD and OpenBSD. On other
+platforms, such as Windows, or if the OS call fails, the attributes are
+omitted rather than sent as zero; a measure that reads as zero or negative
+is omitted too. A failure here never affects the host CLI or the rest of
+the span.
+
+The values are for the whole process, not one command. A CLI process
+normally runs a single command, so that is what a vendor wants, but in a
+long-lived or multi-command process (a daemon, a REPL, a test harness) they
+are cumulative since the process started, and peak memory can never go down.
+CPU time may exceed the command's duration on multi-core machines.
 
 ## What's never captured, at any tier
 

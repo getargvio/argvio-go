@@ -90,3 +90,15 @@ func BenchmarkDisabledClientCommand(b *testing.B) {
 		c.RecordCommand(ctx, CommandResult{Path: "benchcli run", Duration: time.Microsecond})
 	}
 }
+
+// BenchmarkProcessUsage measures the one getrusage read RecordCommand
+// makes at TierBasic+ to attach peak memory and CPU time. It should be
+// a single syscall with 0 allocs/op, i.e. noise next to the rest of
+// RecordCommand (compare BenchmarkInstrumentedCommand, which runs at
+// TierFull and so includes it).
+func BenchmarkProcessUsage(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = processUsage()
+	}
+}
