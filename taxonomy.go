@@ -42,6 +42,11 @@ const (
 	AttrErrorType     = "cli.error.type"         // TierBasic+
 	AttrErrorMessage  = "cli.error.message"      // TierOptIn only
 	AttrErrorStack    = "cli.error.stacktrace"   // TierOptIn only
+
+	// Process-wide resource usage on the command span, omitted where the
+	// platform can't measure it. See RecordCommand.
+	AttrPeakRSSBytes = "cli.process.peak_rss_bytes" // TierBasic+, bytes
+	AttrCPUTimeMs    = "cli.process.cpu_time_ms"    // TierBasic+, user + system
 )
 
 // Log event names.
@@ -295,7 +300,15 @@ type CommandResult struct {
 // frequency, latency, error-rate and exit-code dashboards are built
 // from, so call it once for every command that ran (cobrasdk does).
 //
-// Available at every tier; flag names are only attached at TierBasic+.
+// Available at every tier; flag names and process resource usage are only
+// attached at TierBasic+. The span then carries the process's peak
+// resident memory in bytes (AttrPeakRSSBytes) and its CPU time, user plus
+// system, in milliseconds (AttrCPUTimeMs), read once when RecordCommand
+// is called. They cover the whole process, not just this command, so in a
+// long-lived or multi-command process they are cumulative; a CLI that
+// runs one command per process gets exactly the command's usage. A
+// measure the platform can't provide (Windows has neither) or that the OS
+// fails to report is omitted rather than sent as zero.
 func (c *Client) RecordCommand(ctx context.Context, r CommandResult) {
 	defer recoverGuard(nil)
 	if !c.enabled() {
@@ -314,9 +327,20 @@ func (c *Client) RecordCommand(ctx context.Context, r CommandResult) {
 		attribute.String(AttrCommandName, name),
 		attribute.Int(AttrExitCode, r.ExitCode),
 	}
-	spanAttrs := append(append([]attribute.KeyValue{}, attrs...), attribute.Int64(AttrDurationMs, r.Duration.Milliseconds()))
-	if c.tier.Allows(TierBasic) && len(r.FlagNames) > 0 {
-		spanAttrs = append(spanAttrs, attribute.StringSlice(AttrFlagNames, r.FlagNames))
+	spanAttrs := make([]attribute.KeyValue, 0, len(attrs)+4)
+	spanAttrs = append(spanAttrs, attrs...)
+	spanAttrs = append(spanAttrs, attribute.Int64(AttrDurationMs, r.Duration.Milliseconds()))
+	if c.tier.Allows(TierBasic) {
+		if len(r.FlagNames) > 0 {
+			spanAttrs = append(spanAttrs, attribute.StringSlice(AttrFlagNames, r.FlagNames))
+		}
+		peakRSS, cpuTime := readProcessUsage()
+		if peakRSS > 0 {
+			spanAttrs = append(spanAttrs, attribute.Int64(AttrPeakRSSBytes, peakRSS))
+		}
+		if cpuTime > 0 {
+			spanAttrs = append(spanAttrs, attribute.Int64(AttrCPUTimeMs, cpuTime))
+		}
 	}
 	sessionID := c.ensureSessionID()
 	c.dispatch(func() {
