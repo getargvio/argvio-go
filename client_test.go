@@ -94,6 +94,14 @@ func TestClientAnonymousTierEmitsNoIdentifiers(t *testing.T) {
 	if name, ok := logAttr(srv, EventCommandInvoked, AttrCommandName); !ok || name != "sub" {
 		t.Fatalf("command name is allowed at TierAnonymous, got (%q, %v)", name, ok)
 	}
+	if srv.LogRecord(EventCommandCompleted) == nil {
+		t.Fatal("expected a completed event at TierAnonymous")
+	}
+	for _, key := range []string{AttrSessionID, AttrInstallID} {
+		if _, ok := logAttr(srv, EventCommandCompleted, key); ok {
+			t.Fatalf("TierAnonymous must not include %s on the completed event", key)
+		}
+	}
 	for _, key := range []string{AttrFlagNames, AttrSessionID} {
 		if _, ok := logAttr(srv, EventCommandInvoked, key); ok {
 			t.Fatalf("TierAnonymous must not include %s", key)
@@ -113,12 +121,13 @@ func TestClientAnonymousTierEmitsNoIdentifiers(t *testing.T) {
 	}
 }
 
-func TestClientBasicTierIncludesIdentifiersNoErrorType(t *testing.T) {
+func TestClientBasicTierIncludesIdentifiersAndErrorCategory(t *testing.T) {
 	c, srv := newTestClient(t, TierBasic)
 	ctx := context.Background()
 
 	c.RecordSessionStart(ctx)
 	c.RecordCommandInvocation(ctx, "mycli sub", []string{"verbose"})
+	c.RecordCommand(ctx, CommandResult{Path: "mycli sub", Duration: 1500 * time.Millisecond, ExitCode: 3})
 	c.RecordError(ctx, "mycli sub", ErrorCategoryInternal)
 	flush(t, c)
 
@@ -137,8 +146,33 @@ func TestClientBasicTierIncludesIdentifiersNoErrorType(t *testing.T) {
 		t.Fatal("TierBasic should include flag names")
 	}
 
-	if srv.LogRecord(EventErrorRaised) != nil {
-		t.Fatal("TierBasic must not emit cli.error.raised events (requires TierFull)")
+	if got, _ := logAttr(srv, EventCommandInvoked, AttrInstallID); got != installID {
+		t.Fatalf("expected the install ID on invocation, got %q want %q", got, installID)
+	}
+
+	// The completed event and the error event both tie back to the session
+	// and install, so the server can follow one install across commands.
+	for _, event := range []string{EventCommandCompleted, EventErrorRaised} {
+		if got, _ := logAttr(srv, event, AttrSessionID); got != sessionID {
+			t.Fatalf("%s: session ID = %q, want %q", event, got, sessionID)
+		}
+		if got, _ := logAttr(srv, event, AttrInstallID); got != installID {
+			t.Fatalf("%s: install ID = %q, want %q", event, got, installID)
+		}
+	}
+	rec := srv.LogRecord(EventCommandCompleted)
+	if got := fakeotlp.Attr(rec.GetAttributes(), AttrExitCode).GetIntValue(); got != 3 {
+		t.Fatalf("completed exit code = %d, want 3", got)
+	}
+	if got := fakeotlp.Attr(rec.GetAttributes(), AttrDurationMs).GetIntValue(); got != 1500 {
+		t.Fatalf("completed duration = %d, want 1500", got)
+	}
+
+	if errType, ok := logAttr(srv, EventErrorRaised, AttrErrorType); !ok || errType != string(ErrorCategoryInternal) {
+		t.Fatalf("TierBasic should emit the error category, got (%q, %v)", errType, ok)
+	}
+	if _, ok := logAttr(srv, EventErrorRaised, AttrErrorMessage); ok {
+		t.Fatal("TierBasic must never include a raw error message")
 	}
 }
 
@@ -284,10 +318,30 @@ func TestClientNeverEscalatesAboveConfiguredCeiling(t *testing.T) {
 	}
 	flush(t, c)
 
-	for _, n := range allLogEventNames(srv) {
-		if n == EventErrorRaised {
-			t.Fatalf("unexpected %s event emitted below its required tier", n)
+	// The category event is allowed at TierBasic; raw detail is not.
+	for _, key := range []string{AttrErrorMessage, AttrErrorStack} {
+		if _, ok := logAttr(srv, EventErrorRaised, key); ok {
+			t.Fatalf("%s emitted below TierOptIn", key)
 		}
+	}
+}
+
+func TestClientInstallMethodIsReportedAtEveryTier(t *testing.T) {
+	for _, tier := range []Tier{TierAnonymous, TierBasic} {
+		c, srv := newTestClient(t, tier, WithInstallMethod("brew"))
+		c.RecordSessionStart(context.Background())
+		flush(t, c)
+
+		if got, ok := logAttr(srv, EventSessionStarted, AttrInstallMethod); !ok || got != "brew" {
+			t.Fatalf("%s: install method = (%q, %v), want brew", tier, got, ok)
+		}
+	}
+
+	c, srv := newTestClient(t, TierBasic)
+	c.RecordSessionStart(context.Background())
+	flush(t, c)
+	if _, ok := logAttr(srv, EventSessionStarted, AttrInstallMethod); ok {
+		t.Fatal("install method must be absent unless WithInstallMethod is set")
 	}
 }
 

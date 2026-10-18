@@ -38,6 +38,10 @@ type Client struct {
 
 	cliName       string
 	installIDPath string
+	installMethod string
+
+	installOnce sync.Once
+	installID   string
 
 	latencyHist metric.Float64Histogram
 	invocations metric.Int64Counter
@@ -155,6 +159,7 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		logger:          lp.Logger(instrumentationName),
 		cliName:         cfg.cliName,
 		installIDPath:   resolveInstallIDPath(cfg),
+		installMethod:   cfg.installMethod,
 		latencyHist:     latencyHist,
 		invocations:     invocations,
 		errorEvents:     errorEvents,

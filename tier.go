@@ -21,10 +21,12 @@ const (
 	TierAnonymous Tier = iota
 
 	// TierBasic adds an opaque per-process session ID, an opaque
-	// per-install ID, and flag names (never values).
+	// per-install ID, flag names (never values), and classified error
+	// types.
 	TierBasic
 
-	// TierFull adds classified error types.
+	// TierFull is reserved for fields the server allowlist permits at
+	// this level; this SDK sends nothing extra here beyond TierBasic.
 	TierFull
 
 	// TierOptIn is the explicit opt-in tier: raw error detail (stack

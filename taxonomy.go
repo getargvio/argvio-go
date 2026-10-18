@@ -29,24 +29,26 @@ import (
 // can assert on them without relying on string literals staying in
 // sync.
 const (
-	AttrCommandName  = "cli.command.name"
-	AttrExitCode     = "cli.command.exit_code"
-	AttrDurationMs   = "cli.command.duration_ms"
-	AttrFlagNames    = "cli.flag.names" // TierBasic+
-	AttrSessionID    = "cli.session_id" // TierBasic+
-	AttrInstallID    = "cli.install_id" // TierBasic+
-	AttrHelpFlag     = "cli.help.flag"
-	AttrErrorType    = "cli.error.type"       // TierFull+
-	AttrErrorMessage = "cli.error.message"    // TierOptIn only
-	AttrErrorStack   = "cli.error.stacktrace" // TierOptIn only
+	AttrCommandName   = "cli.command.name"
+	AttrExitCode      = "cli.command.exit_code"
+	AttrDurationMs    = "cli.command.duration_ms"
+	AttrFlagNames     = "cli.flag.names" // TierBasic+
+	AttrSessionID     = "cli.session_id" // TierBasic+
+	AttrInstallID     = "cli.install_id" // TierBasic+
+	AttrHelpFlag      = "cli.help.flag"
+	AttrInstallMethod = "cli.install.method"
+	AttrErrorType     = "cli.error.type"       // TierBasic+
+	AttrErrorMessage  = "cli.error.message"    // TierOptIn only
+	AttrErrorStack    = "cli.error.stacktrace" // TierOptIn only
 )
 
 // Log event names.
 const (
-	EventSessionStarted = "cli.session.started"
-	EventCommandInvoked = "cli.command.invoked"
-	EventHelpViewed     = "cli.help.viewed"
-	EventErrorRaised    = "cli.error.raised"
+	EventSessionStarted   = "cli.session.started"
+	EventCommandInvoked   = "cli.command.invoked"
+	EventCommandCompleted = "cli.command.completed"
+	EventHelpViewed       = "cli.help.viewed"
+	EventErrorRaised      = "cli.error.raised"
 )
 
 // SpanCommandPrefix prefixes the name of the span RecordCommand emits
@@ -182,6 +184,23 @@ func (c *Client) ensureSessionID() string {
 	return id
 }
 
+// identityAttrs returns the session and install ID attributes for a record,
+// empty below TierBasic. It may read or create the install ID file, so call
+// it from inside dispatch rather than on the caller's goroutine.
+func (c *Client) identityAttrs(sessionID string) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	if sessionID != "" {
+		attrs = append(attrs, attribute.String(AttrSessionID, sessionID))
+	}
+	if c.tier.Allows(TierBasic) {
+		c.installOnce.Do(func() { c.installID = loadOrCreateInstallID(c.installIDPath) })
+		if c.installID != "" {
+			attrs = append(attrs, attribute.String(AttrInstallID, c.installID))
+		}
+	}
+	return attrs
+}
+
 // RecordSessionStart records the start of a CLI process session, which
 // is what the server counts sessions, active installs and retention
 // from. Call it as early as possible (cobrasdk does it for you); only the
@@ -198,16 +217,10 @@ func (c *Client) RecordSessionStart(ctx context.Context) {
 		return
 	}
 	sessionID := c.ensureSessionID()
-	basic := c.tier.Allows(TierBasic)
 	c.dispatch(func() {
-		var attrs []attribute.KeyValue
-		if sessionID != "" {
-			attrs = append(attrs, attribute.String(AttrSessionID, sessionID))
-		}
-		if basic {
-			if id := loadOrCreateInstallID(c.installIDPath); id != "" {
-				attrs = append(attrs, attribute.String(AttrInstallID, id))
-			}
+		attrs := c.identityAttrs(sessionID)
+		if c.installMethod != "" {
+			attrs = append(attrs, attribute.String(AttrInstallMethod, c.installMethod))
 		}
 		c.emitEventNow(ctx, EventSessionStarted, otellog.SeverityInfo1, attrs...)
 	})
@@ -232,15 +245,13 @@ func (c *Client) RecordCommandInvocation(ctx context.Context, commandPath string
 		return
 	}
 	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, c.commandName(commandPath))}
-	if c.tier.Allows(TierBasic) {
-		if len(flagNames) > 0 {
-			attrs = append(attrs, attribute.StringSlice(AttrFlagNames, flagNames))
-		}
-		if id := c.ensureSessionID(); id != "" {
-			attrs = append(attrs, attribute.String(AttrSessionID, id))
-		}
+	if c.tier.Allows(TierBasic) && len(flagNames) > 0 {
+		attrs = append(attrs, attribute.StringSlice(AttrFlagNames, flagNames))
 	}
-	c.emitEvent(ctx, EventCommandInvoked, otellog.SeverityInfo1, attrs...)
+	sessionID := c.ensureSessionID()
+	c.dispatch(func() {
+		c.emitEventNow(ctx, EventCommandInvoked, otellog.SeverityInfo1, append(attrs, c.identityAttrs(sessionID)...)...)
+	})
 }
 
 // CommandResult describes one completed command, for RecordCommand.
@@ -287,6 +298,7 @@ func (c *Client) RecordCommand(ctx context.Context, r CommandResult) {
 	if c.tier.Allows(TierBasic) && len(r.FlagNames) > 0 {
 		spanAttrs = append(spanAttrs, attribute.StringSlice(AttrFlagNames, r.FlagNames))
 	}
+	sessionID := c.ensureSessionID()
 	c.dispatch(func() {
 		_, span := c.tracer.Start(ctx, SpanCommandPrefix+name,
 			trace.WithTimestamp(start),
@@ -299,6 +311,15 @@ func (c *Client) RecordCommand(ctx context.Context, r CommandResult) {
 
 		c.invocations.Add(ctx, 1, metric.WithAttributes(attrs...))
 		c.latencyHist.Record(ctx, float64(r.Duration.Microseconds())/1000, metric.WithAttributes(attrs...))
+
+		// The completed event ties the outcome to the session and install,
+		// which the span can't carry; the server's activation and friction
+		// views are built from it.
+		c.emitEventNow(ctx, EventCommandCompleted, otellog.SeverityInfo1, append([]attribute.KeyValue{
+			attribute.String(AttrCommandName, name),
+			attribute.Int(AttrExitCode, r.ExitCode),
+			attribute.Int64(AttrDurationMs, r.Duration.Milliseconds()),
+		}, c.identityAttrs(sessionID)...)...)
 	})
 }
 
@@ -326,8 +347,8 @@ func (c *Client) RecordHelpFlagUsage(ctx context.Context, commandPath string) {
 // recorder when the resolved tier is actually TierOptIn.
 //
 // At every tier this counts the error on the cli.errors metric by
-// command. At TierFull+ the category is attached as the error type and a
-// cli.error.raised event is emitted too.
+// command. At TierBasic+ the category is attached as the error type and a
+// cli.error.raised event is emitted too, tied to the session and install.
 func (c *Client) RecordError(ctx context.Context, commandPath string, category ErrorCategory) {
 	defer recoverGuard(nil)
 	if !c.enabled() {
@@ -337,17 +358,18 @@ func (c *Client) RecordError(ctx context.Context, commandPath string, category E
 		category = ErrorCategoryUnknown
 	}
 	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, c.commandName(commandPath))}
-	if c.tier.Allows(TierFull) {
+	basic := c.tier.Allows(TierBasic)
+	if basic {
 		attrs = append(attrs, attribute.String(AttrErrorType, string(category)))
 	}
 	metricAttrs := append([]attribute.KeyValue{c.tierAttr()}, attrs...)
+	sessionID := c.ensureSessionID()
 	c.dispatch(func() {
 		c.errorEvents.Add(ctx, 1, metric.WithAttributes(metricAttrs...))
+		if basic {
+			c.emitEventNow(ctx, EventErrorRaised, otellog.SeverityError1, append(attrs, c.identityAttrs(sessionID)...)...)
+		}
 	})
-	if !c.tier.Allows(TierFull) {
-		return
-	}
-	c.emitEvent(ctx, EventErrorRaised, otellog.SeverityError1, attrs...)
 }
 
 // OptInScope exposes telemetry capabilities that require the user's

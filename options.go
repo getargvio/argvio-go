@@ -37,6 +37,7 @@ type config struct {
 
 	ci            CIInfo
 	installIDPath string
+	installMethod string
 }
 
 type keyValue struct {
