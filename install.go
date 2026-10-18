@@ -25,6 +25,22 @@ func WithInstallIDPath(path string) Option {
 	}
 }
 
+// maxInstallMethodLength is the server's max_length for cli.install.method.
+const maxInstallMethodLength = 32
+
+// WithInstallMethod reports how this CLI was installed (for example "brew",
+// "npm", "curl" or "binary") on the session start event, at every consent
+// tier. The SDK can't tell on its own, so the vendor supplies it, typically
+// from a value stamped in at build time. Empty (the default) sends nothing.
+func WithInstallMethod(method string) Option {
+	return func(c *config) {
+		if len(method) > maxInstallMethodLength {
+			method = method[:maxInstallMethodLength]
+		}
+		c.installMethod = method
+	}
+}
+
 func resolveInstallIDPath(cfg *config) string {
 	if cfg.installIDPath == os.DevNull {
 		return ""

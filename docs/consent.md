@@ -41,7 +41,7 @@ numbers even from users who've never made a choice.
 | `RecordExitCode` | exit code, no command path |
 | `RecordLatency` | duration, no command path |
 | `RecordHelpFlagUsage` | a bare "help was used" event, no command path |
-| `RecordError` | **nothing** — dropped, counted in `Stats().BelowTierDropped` |
+| `RecordError` | `cli.errors` counter increment by command; no category, no event |
 
 ### TierBasic
 
@@ -50,16 +50,21 @@ flag *names* (never values — see below) to `RecordCommandInvocation`,
 and adds the command path attribute to `RecordExitCode`,
 `RecordLatency`, and `RecordHelpFlagUsage`.
 
+Also adds:
+- A per-process session correlation ID (`AttrSessionID`) — a random value
+  generated once per `Client`, not a user or device identifier, and not
+  persisted anywhere — and a per-install ID (`AttrInstallID`), a random
+  UUID persisted in the CLI's config directory. Both are attached to the
+  session start, command invoked, command completed and error events, so
+  the server can follow one install across invocations.
+- `RecordError` starts emitting a `cli.error.raised` event: category
+  (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
+  a message or stack trace — see TierOptIn.
+
 ### TierFull
 
-Adds:
-- A per-process session correlation ID (`AttrSessionID`) on
-  `RecordSessionStart`/`RecordSessionEnd` — a random value generated
-  once per `Client`, not a user or device identifier, and not
-  persisted anywhere.
-- `RecordError` starts actually emitting: category (`ErrorCategory`,
-  e.g. `ErrorCategoryNetwork`) plus command path. Never a message or
-  stack trace — see TierOptIn.
+Reserved. The server allowlist permits some fields at this level, but this
+SDK sends nothing here beyond TierBasic.
 
 ### TierOptIn
 
