@@ -36,7 +36,7 @@ numbers even from users who've never made a choice.
 
 | Function | What's emitted at Anonymous |
 |---|---|
-| `RecordSessionStart`/`End` | `cli.sessions` counter increment only |
+| `RecordSessionStart`/`End` | `cli.sessions` counter increment only; no binary size or startup time |
 | `RecordCommandInvocation` | `cli.invocations` counter increment only |
 | `RecordExitCode` | exit code, no command path |
 | `RecordLatency` | duration, no command path |
@@ -72,6 +72,12 @@ Also adds:
   the OS counters are not even read there. They are not on the
   `cli.command.completed` event. See
   [Process resource usage](#process-resource-usage) below.
+- `RecordSessionStart` adds the executable's size,
+  `cli.binary.size_bytes` (bytes), and the startup overhead,
+  `cli.startup.duration_ms` (milliseconds), to the `cli.session.started`
+  event. Nothing is measured for these at `TierAnonymous`. See
+  [Binary size and startup overhead](#binary-size-and-startup-overhead)
+  below.
 - `RecordError` starts emitting a `cli.error.raised` event: category
   (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
   a message or stack trace — see TierOptIn.
@@ -124,6 +130,35 @@ normally runs a single command, so that is what a vendor wants, but in a
 long-lived or multi-command process (a daemon, a REPL, a test harness) they
 are cumulative since the process started, and peak memory can never go down.
 CPU time may exceed the command's duration on multi-core machines.
+
+## Binary size and startup overhead
+
+At `TierBasic` and above, `RecordSessionStart` attaches two integers to the
+`cli.session.started` event, so vendors can see how their CLI's size and
+startup cost change from release to release:
+
+| Attribute | Meaning | Unit |
+|---|---|---|
+| `cli.binary.size_bytes` | Size of the running executable | bytes |
+| `cli.startup.duration_ms` | Time from this package loading until `RecordSessionStart` is called | milliseconds |
+
+Both are sent once per process, on the session start only, never per
+command.
+
+The size is one `os.Executable` and one `stat` (symlinks are followed),
+done once per `Client` off the caller's goroutine. It is omitted if the
+path can't be resolved, the `stat` fails, or the file reports no size.
+
+Go has no portable process start time, so the startup overhead is measured
+from the SDK's package initialisation. It therefore **excludes** the Go
+runtime's own start-up and the `init` of every package loaded before this
+one (all of this SDK's dependencies, and any package the CLI imports ahead
+of it), so it understates the true figure. Compare it between releases of
+the same CLI rather than against other CLIs. `cobrasdk` calls
+`RecordSessionStart` just before the command runs, which is the end point
+the figure is meant to measure; if you call it yourself, do so at the same
+place in every release. A startup of 0 ms is a real measurement and is
+sent; a value that can't be measured is omitted, never sent as zero.
 
 ## What's never captured, at any tier
 

@@ -47,6 +47,11 @@ const (
 	// platform can't measure it. See RecordCommand.
 	AttrPeakRSSBytes = "cli.process.peak_rss_bytes" // TierBasic+, bytes
 	AttrCPUTimeMs    = "cli.process.cpu_time_ms"    // TierBasic+, user + system
+
+	// Build and startup cost on the session start event, omitted where it
+	// can't be measured. See RecordSessionStart.
+	AttrBinarySizeBytes = "cli.binary.size_bytes"   // TierBasic+, bytes
+	AttrStartupMs       = "cli.startup.duration_ms" // TierBasic+, milliseconds
 )
 
 // Log event names.
@@ -234,16 +239,41 @@ func (c *Client) identityAttrs(sessionID string) []attribute.KeyValue {
 // also carries the per-process session ID and the install ID (see
 // AttrInstallID), a random UUID persisted in the CLI's config directory
 // the first time it is needed — never derived from the user or machine.
+//
+// At TierBasic+ it also carries the executable's size in bytes
+// (AttrBinarySizeBytes) and the startup overhead in milliseconds
+// (AttrStartupMs), the time from this package loading until this call, so
+// call it right before the command runs (cobrasdk does). Go has no
+// portable process start time, so the overhead excludes the runtime's
+// initialisation and the init of packages loaded before this one. The size
+// is read with one stat, off the caller's goroutine. A value that can't be
+// measured is omitted rather than sent as zero; a startup of 0 ms is a real
+// measurement and is sent.
 func (c *Client) RecordSessionStart(ctx context.Context) {
 	defer recoverGuard(nil)
 	if !c.enabled() || !c.sessionOn.CompareAndSwap(false, true) {
 		return
 	}
 	sessionID := c.ensureSessionID()
+	basic := c.tier.Allows(TierBasic)
+	var startupMs int64
+	if basic {
+		// Read here, not in the job, so queueing behind other work doesn't
+		// count as startup.
+		startupMs = readStartupMs()
+	}
 	c.dispatch(func() {
 		attrs := c.identityAttrs(sessionID)
 		if c.installMethod != "" {
 			attrs = append(attrs, attribute.String(AttrInstallMethod, c.installMethod))
+		}
+		if basic {
+			if size, ok := readBinarySize(); ok && size > 0 {
+				attrs = append(attrs, attribute.Int64(AttrBinarySizeBytes, size))
+			}
+			if startupMs >= 0 {
+				attrs = append(attrs, attribute.Int64(AttrStartupMs, startupMs))
+			}
 		}
 		c.emitEventNow(ctx, EventSessionStarted, otellog.SeverityInfo1, attrs...)
 	})
