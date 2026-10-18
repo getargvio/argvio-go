@@ -42,6 +42,7 @@ numbers even from users who've never made a choice.
 | `RecordLatency` | duration, no command path |
 | `RecordHelpFlagUsage` | a bare "help was used" event, no command path |
 | `RecordError` | `cli.errors` counter increment by command; no category, no event |
+| `RecordFeatureActivated` | nothing |
 
 ### TierBasic
 
@@ -57,6 +58,13 @@ Also adds:
   UUID persisted in the CLI's config directory. Both are attached to the
   session start, command invoked, command completed and error events, so
   the server can follow one install across invocations.
+- `RecordFeatureActivated` starts emitting a `cli.feature.activated` event:
+  the feature name, the command name when `RecordCommandInvocation` has
+  already run, and the session and install IDs. The feature name is free
+  text supplied by your code, so pass a fixed identifier (for example
+  `"deploy.dry-run"`), never anything derived from user input. It is cut to
+  64 bytes, and each distinct feature is sent at most once per process; the
+  server works out an install's first use of a feature itself.
 - `RecordError` starts emitting a `cli.error.raised` event: category
   (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
   a message or stack trace — see TierOptIn.

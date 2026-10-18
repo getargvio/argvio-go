@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -37,9 +38,10 @@ const (
 	AttrInstallID     = "cli.install_id" // TierBasic+
 	AttrHelpFlag      = "cli.help.flag"
 	AttrInstallMethod = "cli.install.method"
-	AttrErrorType     = "cli.error.type"       // TierBasic+
-	AttrErrorMessage  = "cli.error.message"    // TierOptIn only
-	AttrErrorStack    = "cli.error.stacktrace" // TierOptIn only
+	AttrFeature       = "cli.activation.feature" // TierBasic+
+	AttrErrorType     = "cli.error.type"         // TierBasic+
+	AttrErrorMessage  = "cli.error.message"      // TierOptIn only
+	AttrErrorStack    = "cli.error.stacktrace"   // TierOptIn only
 )
 
 // Log event names.
@@ -49,6 +51,7 @@ const (
 	EventCommandCompleted = "cli.command.completed"
 	EventHelpViewed       = "cli.help.viewed"
 	EventErrorRaised      = "cli.error.raised"
+	EventFeatureActivated = "cli.feature.activated"
 )
 
 // SpanCommandPrefix prefixes the name of the span RecordCommand emits
@@ -66,6 +69,9 @@ const (
 
 // maxCommandNameLength is the server's max_length for cli.command.name.
 const maxCommandNameLength = 128
+
+// maxFeatureLength is the server's max_length for cli.activation.feature.
+const maxFeatureLength = 64
 
 // ErrorCategory is a coarse, vendor-assigned classification of an error
 // — deliberately not the error's message or type name, both of which
@@ -118,6 +124,18 @@ func (c *Client) commandName(commandPath string) string {
 		name = name[:maxCommandNameLength]
 	}
 	return name
+}
+
+// truncateUTF8 cuts s to at most max bytes without splitting a multi-byte
+// character, which the server could reject as invalid UTF-8.
+func truncateUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
 }
 
 func newSessionID() string {
@@ -244,7 +262,9 @@ func (c *Client) RecordCommandInvocation(ctx context.Context, commandPath string
 	if !c.enabled() {
 		return
 	}
-	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, c.commandName(commandPath))}
+	name := c.commandName(commandPath)
+	c.currentCommand.Store(&name)
+	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, name)}
 	if c.tier.Allows(TierBasic) && len(flagNames) > 0 {
 		attrs = append(attrs, attribute.StringSlice(AttrFlagNames, flagNames))
 	}
@@ -320,6 +340,47 @@ func (c *Client) RecordCommand(ctx context.Context, r CommandResult) {
 			attribute.Int(AttrExitCode, r.ExitCode),
 			attribute.Int64(AttrDurationMs, r.Duration.Milliseconds()),
 		}, c.identityAttrs(sessionID)...)...)
+	})
+}
+
+// --- Features --------------------------------------------------------
+
+// RecordFeatureActivated records that the user used one of the CLI's
+// features, so vendors can see which features an install has actually
+// adopted. The event carries the feature name, the name of the command
+// last passed to RecordCommandInvocation (when there was one), and the
+// session and install IDs.
+//
+// feature must be a fixed identifier chosen by the vendor in code (for
+// example "deploy.dry-run"), never user input: it is sent as-is, and this
+// SDK does not scrub it. It is cut to 64 bytes, the server's limit, and
+// an empty feature is ignored.
+//
+// Each distinct feature is reported at most once per Client (that is,
+// once per process), to keep volume down; the server works out the first
+// time an install used a feature on its own, so repeating the call adds
+// nothing. The event is TierBasic+, since it is only useful tied to an
+// install; below that nothing is emitted and the feature is not
+// remembered. Safe to call on a nil or disabled Client.
+func (c *Client) RecordFeatureActivated(ctx context.Context, feature string) {
+	defer recoverGuard(nil)
+	if !c.gate(TierBasic) {
+		return
+	}
+	feature = truncateUTF8(feature, maxFeatureLength)
+	if feature == "" {
+		return
+	}
+	if _, seen := c.activated.LoadOrStore(feature, struct{}{}); seen {
+		return
+	}
+	attrs := []attribute.KeyValue{attribute.String(AttrFeature, feature)}
+	if p := c.currentCommand.Load(); p != nil {
+		attrs = append(attrs, attribute.String(AttrCommandName, *p))
+	}
+	sessionID := c.ensureSessionID()
+	c.dispatch(func() {
+		c.emitEventNow(ctx, EventFeatureActivated, otellog.SeverityInfo1, append(attrs, c.identityAttrs(sessionID)...)...)
 	})
 }
 
