@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ func newTestClient(t *testing.T, tier argvio.Tier) (*argvio.Client, *fakeotlp.Se
 		argvio.WithInsecure(),
 		argvio.WithDefaultTier(tier),
 		argvio.WithExportTimeout(2*time.Second),
+		argvio.WithInstallIDPath(filepath.Join(t.TempDir(), "install-id")),
 	)
 	if err != nil {
 		t.Fatalf("argvio.New: %v", err)
@@ -107,12 +109,23 @@ func TestInstrumentCobraCapturesSuccessfulInvocation(t *testing.T) {
 	}
 	flush(t, client)
 
-	path, ok := eventAttr(srv, "cli.command_invocation", argvio.AttrCommandPath)
-	if !ok || path != "samplecli sub" {
-		t.Fatalf("expected command path %q, got (%q, %v)", "samplecli sub", path, ok)
+	name, ok := eventAttr(srv, argvio.EventCommandInvoked, argvio.AttrCommandName)
+	if !ok || name != "sub" {
+		t.Fatalf("expected command name %q, got (%q, %v)", "sub", name, ok)
 	}
-	if !hasEvent(srv, "cli.exit_code") {
-		t.Fatal("expected cli.exit_code event")
+	if !hasEvent(srv, argvio.EventSessionStarted) {
+		t.Fatal("expected a session started event")
+	}
+	span := srv.Span(argvio.SpanCommandPrefix + "sub")
+	if span == nil {
+		t.Fatal("expected a cli.command.sub span")
+	}
+	if code := fakeotlp.Attr(span.GetAttributes(), argvio.AttrExitCode); code.GetIntValue() != 0 || code == nil {
+		t.Fatalf("expected exit code 0 on span, got %v", code)
+	}
+	flags := fakeotlp.Attr(span.GetAttributes(), argvio.AttrFlagNames).GetArrayValue().GetValues()
+	if len(flags) != 1 || flags[0].GetStringValue() != "verbose" {
+		t.Fatalf("expected flag names [verbose] on span, got %v", flags)
 	}
 }
 
@@ -137,14 +150,16 @@ func TestInstrumentCobraCapturesFailingCommand(t *testing.T) {
 	// implementation would miss: Cobra does not run PersistentPostRunE
 	// when RunE errors, so exit code / error capture must come from the
 	// RunE wrapper, not the persistent hook.
-	code, ok := eventAttr(srv, "cli.exit_code", argvio.AttrExitCode)
-	_ = code
-	if !ok {
-		t.Fatal("expected cli.exit_code event even though RunE returned an error")
+	span := srv.Span(argvio.SpanCommandPrefix + "sub")
+	if span == nil {
+		t.Fatal("expected a cli.command.sub span even though RunE returned an error")
 	}
-	cat, ok := eventAttr(srv, "cli.error", argvio.AttrErrorCategory)
-	if !ok || cat != string(argvio.ErrorCategoryValidation) {
-		t.Fatalf("expected classified error category, got (%q, %v)", cat, ok)
+	if code := fakeotlp.Attr(span.GetAttributes(), argvio.AttrExitCode).GetIntValue(); code != 1 {
+		t.Fatalf("expected exit code 1 on span, got %d", code)
+	}
+	errType, ok := eventAttr(srv, argvio.EventErrorRaised, argvio.AttrErrorType)
+	if !ok || errType != string(argvio.ErrorCategoryValidation) {
+		t.Fatalf("expected classified error type, got (%q, %v)", errType, ok)
 	}
 }
 
@@ -160,13 +175,16 @@ func TestInstrumentCobraCapturesHelp(t *testing.T) {
 	}
 	flush(t, client)
 
-	if !hasEvent(srv, "cli.help_flag_used") {
-		t.Fatal("expected cli.help_flag_used event for --help invocation")
+	if !hasEvent(srv, argvio.EventHelpViewed) {
+		t.Fatal("expected cli.help.viewed event for --help invocation")
 	}
-	// --help must not also produce an invocation/exit-code event: Cobra
-	// returns before running PersistentPreRunE or RunE in this path.
-	if hasEvent(srv, "cli.exit_code") {
-		t.Fatal("did not expect cli.exit_code event for a --help invocation")
+	if !hasEvent(srv, argvio.EventSessionStarted) {
+		t.Fatal("expected a session started event for a --help invocation")
+	}
+	// --help must not also produce a command span: Cobra returns before
+	// running PersistentPreRunE or RunE in this path.
+	if srv.Span(argvio.SpanCommandPrefix+"sub") != nil {
+		t.Fatal("did not expect a command span for a --help invocation")
 	}
 }
 
@@ -203,7 +221,7 @@ func TestInstrumentCobraChainsExistingHooks(t *testing.T) {
 	}
 	flush(t, client)
 
-	if _, ok := eventAttr(srv, "cli.command_invocation", argvio.AttrCommandPath); !ok {
+	if _, ok := eventAttr(srv, argvio.EventCommandInvoked, argvio.AttrCommandName); !ok {
 		t.Fatal("expected our own capture to still fire alongside the vendor's chained hook")
 	}
 }
@@ -237,10 +255,46 @@ func TestWithoutRunCaptureDisablesExitCodeCapture(t *testing.T) {
 	}
 	flush(t, client)
 
-	if hasEvent(srv, "cli.exit_code") {
+	if srv.Span(argvio.SpanCommandPrefix+"sub") != nil {
 		t.Fatal("WithoutRunCapture should disable automatic exit-code capture")
 	}
-	if _, ok := eventAttr(srv, "cli.command_invocation", argvio.AttrCommandPath); !ok {
+	if _, ok := eventAttr(srv, argvio.EventCommandInvoked, argvio.AttrCommandName); !ok {
 		t.Fatal("command-invocation capture should be unaffected by WithoutRunCapture")
 	}
+}
+
+func TestRecordExitCapturesCommandsThatExitThemselves(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierBasic)
+	root := newSampleCLI(nil)
+	// Stands in for a command that would call os.Exit(3) after RecordExit.
+	root.Commands()[0].RunE = func(cmd *cobra.Command, _ []string) error {
+		RecordExit(cmd, client, 3)
+		return nil
+	}
+	InstrumentCobra(root, client, WithoutRunCapture())
+
+	root.SetArgs([]string{"sub", "--verbose"})
+	root.SetOut(&bytes.Buffer{})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	flush(t, client)
+
+	span := srv.Span(argvio.SpanCommandPrefix + "sub")
+	if span == nil {
+		t.Fatal("expected RecordExit to record a cli.command.sub span")
+	}
+	if code := fakeotlp.Attr(span.GetAttributes(), argvio.AttrExitCode).GetIntValue(); code != 3 {
+		t.Fatalf("expected exit code 3 on span, got %d", code)
+	}
+	if fakeotlp.Attr(span.GetAttributes(), argvio.AttrDurationMs) == nil {
+		t.Fatal("expected a duration measured from the pre-run start time")
+	}
+}
+
+func TestRecordExitNilSafety(t *testing.T) {
+	RecordExit(nil, nil, 1)
+	root := newSampleCLI(nil)
+	root.SetContext(context.Background())
+	RecordExit(root, nil, 1)
 }

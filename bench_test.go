@@ -68,8 +68,7 @@ func BenchmarkInstrumentedCommand(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		c.RecordCommandInvocation(ctx, "benchcli run", nil)
 		simulatedCommandWork()
-		c.RecordLatency(ctx, "benchcli run", time.Microsecond)
-		c.RecordExitCode(ctx, "benchcli run", 0)
+		c.RecordCommand(ctx, CommandResult{Path: "benchcli run", Duration: time.Microsecond})
 	}
 }
 
@@ -88,7 +87,6 @@ func BenchmarkDisabledClientCommand(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		c.RecordCommandInvocation(ctx, "benchcli run", nil)
 		simulatedCommandWork()
-		c.RecordLatency(ctx, "benchcli run", time.Microsecond)
-		c.RecordExitCode(ctx, "benchcli run", 0)
+		c.RecordCommand(ctx, CommandResult{Path: "benchcli run", Duration: time.Microsecond})
 	}
 }

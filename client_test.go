@@ -3,8 +3,14 @@ package argvio
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 
 	"github.com/getargvio/argvio-go/internal/fakeotlp"
 )
@@ -22,6 +28,7 @@ func newTestClient(t *testing.T, tier Tier, opts ...Option) (*Client, *fakeotlp.
 		WithInsecure(),
 		WithDefaultTier(tier),
 		WithExportTimeout(2 * time.Second),
+		WithInstallIDPath(filepath.Join(t.TempDir(), "install-id")),
 	}, opts...)
 
 	c, err := New("test-api-key", "testcli", "1.2.3", allOpts...)
@@ -75,49 +82,148 @@ func logAttr(srv *fakeotlp.Server, eventName, key string) (string, bool) {
 	return "", false
 }
 
-func TestClientAnonymousTierEmitsNoCommandPath(t *testing.T) {
+func TestClientAnonymousTierEmitsNoIdentifiers(t *testing.T) {
 	c, srv := newTestClient(t, TierAnonymous)
 	ctx := context.Background()
 
-	c.RecordCommandInvocation(ctx, "mycli sub", []string{"verbose"})
-	c.RecordExitCode(ctx, "mycli sub", 0)
+	c.RecordSessionStart(ctx)
+	c.RecordCommandInvocation(ctx, "testcli sub", []string{"verbose"})
+	c.RecordCommand(ctx, CommandResult{Path: "testcli sub", FlagNames: []string{"verbose"}, Duration: time.Millisecond})
 	flush(t, c)
 
-	if _, ok := logAttr(srv, "cli.command_invocation", AttrCommandPath); ok {
-		t.Fatal("TierAnonymous must not emit cli.command_invocation events at all")
+	if name, ok := logAttr(srv, EventCommandInvoked, AttrCommandName); !ok || name != "sub" {
+		t.Fatalf("command name is allowed at TierAnonymous, got (%q, %v)", name, ok)
 	}
-	if path, ok := logAttr(srv, "cli.exit_code", AttrCommandPath); ok {
-		t.Fatalf("TierAnonymous must not include command path on exit code, got %q", path)
-	}
-
-	names := allLogEventNames(srv)
-	for _, n := range names {
-		if n == "cli.command_invocation" {
-			t.Fatal("TierAnonymous must not emit a command_invocation log event")
+	for _, key := range []string{AttrFlagNames, AttrSessionID} {
+		if _, ok := logAttr(srv, EventCommandInvoked, key); ok {
+			t.Fatalf("TierAnonymous must not include %s", key)
 		}
+	}
+	for _, key := range []string{AttrSessionID, AttrInstallID} {
+		if _, ok := logAttr(srv, EventSessionStarted, key); ok {
+			t.Fatalf("TierAnonymous must not include %s on session start", key)
+		}
+	}
+	span := srv.Span(SpanCommandPrefix + "sub")
+	if span == nil {
+		t.Fatal("expected a command span at TierAnonymous")
+	}
+	if fakeotlp.Attr(span.GetAttributes(), AttrFlagNames) != nil {
+		t.Fatal("TierAnonymous must not include flag names on the command span")
 	}
 }
 
-func TestClientBasicTierIncludesCommandPathNoErrors(t *testing.T) {
+func TestClientBasicTierIncludesIdentifiersNoErrorType(t *testing.T) {
 	c, srv := newTestClient(t, TierBasic)
 	ctx := context.Background()
 
+	c.RecordSessionStart(ctx)
 	c.RecordCommandInvocation(ctx, "mycli sub", []string{"verbose"})
 	c.RecordError(ctx, "mycli sub", ErrorCategoryInternal)
 	flush(t, c)
 
-	path, ok := logAttr(srv, "cli.command_invocation", AttrCommandPath)
-	if !ok || path != "mycli sub" {
-		t.Fatalf("TierBasic should include command path, got (%q, %v)", path, ok)
+	installID, ok := logAttr(srv, EventSessionStarted, AttrInstallID)
+	if !ok || !validInstallID(installID) {
+		t.Fatalf("TierBasic should include an install ID, got (%q, %v)", installID, ok)
+	}
+	sessionID, ok := logAttr(srv, EventSessionStarted, AttrSessionID)
+	if !ok || sessionID == "" {
+		t.Fatal("TierBasic should include a session ID on session start")
+	}
+	if got, _ := logAttr(srv, EventCommandInvoked, AttrSessionID); got != sessionID {
+		t.Fatalf("expected the same session ID on invocation, got %q want %q", got, sessionID)
+	}
+	if rec := srv.LogRecord(EventCommandInvoked); fakeotlp.Attr(rec.GetAttributes(), AttrFlagNames) == nil {
+		t.Fatal("TierBasic should include flag names")
 	}
 
+	if srv.LogRecord(EventErrorRaised) != nil {
+		t.Fatal("TierBasic must not emit cli.error.raised events (requires TierFull)")
+	}
+}
+
+func TestClientInstallIDIsStable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "install-id")
+	first := loadOrCreateInstallID(path)
+	if !validInstallID(first) {
+		t.Fatalf("expected a UUID, got %q", first)
+	}
+	if again := loadOrCreateInstallID(path); again != first {
+		t.Fatalf("install ID changed across runs: %q then %q", first, again)
+	}
+	if err := os.WriteFile(path, []byte("not-a-uuid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if replaced := loadOrCreateInstallID(path); replaced == first || !validInstallID(replaced) {
+		t.Fatalf("expected a corrupt install ID to be replaced, got %q", replaced)
+	}
+	if id := loadOrCreateInstallID(filepath.Join(path, "under-a-file")); id != "" {
+		t.Fatalf("expected no install ID when it can't be persisted, got %q", id)
+	}
+}
+
+func TestClientSessionStartEmitsOnce(t *testing.T) {
+	c, srv := newTestClient(t, TierBasic)
+	ctx := context.Background()
+
+	c.RecordSessionStart(ctx)
+	c.RecordSessionStart(ctx)
+	flush(t, c)
+
+	count := 0
 	for _, n := range allLogEventNames(srv) {
-		if n == "cli.error" {
-			t.Fatal("TierBasic must not emit cli.error events (requires TierFull)")
+		if n == EventSessionStarted {
+			count++
 		}
 	}
-	if got := c.Stats().BelowTierDropped; got == 0 {
-		t.Fatal("expected RecordError at TierBasic to be counted as dropped-below-tier")
+	if count != 1 {
+		t.Fatalf("expected exactly one session start event, got %d", count)
+	}
+}
+
+func TestClientCommandSpan(t *testing.T) {
+	c, srv := newTestClient(t, TierBasic)
+	start := time.Now().Add(-time.Second)
+
+	c.RecordCommand(context.Background(), CommandResult{
+		Path: "testcli deploy push", FlagNames: []string{"force"}, Start: start, Duration: 250 * time.Millisecond, ExitCode: 2,
+	})
+	flush(t, c)
+
+	span := srv.Span(SpanCommandPrefix + "deploy.push")
+	if span == nil {
+		t.Fatal("expected a cli.command.deploy.push span")
+	}
+	attrs := span.GetAttributes()
+	if got := fakeotlp.Attr(attrs, AttrCommandName).GetStringValue(); got != "deploy.push" {
+		t.Errorf("command name = %q, want %q", got, "deploy.push")
+	}
+	if got := fakeotlp.Attr(attrs, AttrExitCode).GetIntValue(); got != 2 {
+		t.Errorf("exit code = %d, want 2", got)
+	}
+	if got := fakeotlp.Attr(attrs, AttrDurationMs).GetIntValue(); got != 250 {
+		t.Errorf("duration_ms = %d, want 250", got)
+	}
+	if got := time.Unix(0, int64(span.GetEndTimeUnixNano())).Sub(time.Unix(0, int64(span.GetStartTimeUnixNano()))); got != 250*time.Millisecond { //nolint:gosec // test timestamps fit in int64
+		t.Errorf("span duration = %v, want 250ms", got)
+	}
+	if span.GetStatus().GetCode() != tracepb.Status_STATUS_CODE_ERROR {
+		t.Error("expected error status for a non-zero exit code")
+	}
+}
+
+func TestClientCommandName(t *testing.T) {
+	c := &Client{cliName: "mycli"}
+	tests := map[string]string{
+		"mycli deploy push": "deploy.push",
+		"mycli":             "mycli",
+		"":                  "mycli",
+		"other sub":         "other.sub",
+	}
+	for path, want := range tests {
+		if got := c.commandName(path); got != want {
+			t.Errorf("commandName(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
 
@@ -128,11 +234,11 @@ func TestClientFullTierEmitsRedactedError(t *testing.T) {
 	c.RecordError(ctx, "mycli sub", ErrorCategoryNetwork)
 	flush(t, c)
 
-	cat, ok := logAttr(srv, "cli.error", AttrErrorCategory)
-	if !ok || cat != string(ErrorCategoryNetwork) {
-		t.Fatalf("TierFull should emit cli.error with category, got (%q, %v)", cat, ok)
+	errType, ok := logAttr(srv, EventErrorRaised, AttrErrorType)
+	if !ok || errType != string(ErrorCategoryNetwork) {
+		t.Fatalf("TierFull should emit cli.error.raised with the error type, got (%q, %v)", errType, ok)
 	}
-	if _, ok := logAttr(srv, "cli.error", AttrErrorMessage); ok {
+	if _, ok := logAttr(srv, EventErrorRaised, AttrErrorMessage); ok {
 		t.Fatal("TierFull must never include a raw error message")
 	}
 }
@@ -156,7 +262,7 @@ func TestClientOptInTierEmitsRawErrorMessage(t *testing.T) {
 	scope.RecordErrorDetail(context.Background(), "mycli sub", errors.New("stack overflow at line 42"))
 	flush(t, c)
 
-	msg, ok := logAttr(srv, "cli.error_detail", AttrErrorMessage)
+	msg, ok := logAttr(srv, EventErrorRaised, AttrErrorMessage)
 	if !ok || msg != "stack overflow at line 42" {
 		t.Fatalf("expected raw error message at TierOptIn, got (%q, %v)", msg, ok)
 	}
@@ -179,7 +285,7 @@ func TestClientNeverEscalatesAboveConfiguredCeiling(t *testing.T) {
 	flush(t, c)
 
 	for _, n := range allLogEventNames(srv) {
-		if n == "cli.error" || n == "cli.error_detail" {
+		if n == EventErrorRaised {
 			t.Fatalf("unexpected %s event emitted below its required tier", n)
 		}
 	}
@@ -205,8 +311,7 @@ func TestClientDisabledIsZeroNetworkCalls(t *testing.T) {
 	ctx := context.Background()
 	c.RecordSessionStart(ctx)
 	c.RecordCommandInvocation(ctx, "mycli sub", []string{"x"})
-	c.RecordExitCode(ctx, "mycli sub", 1)
-	c.RecordLatency(ctx, "mycli sub", time.Millisecond)
+	c.RecordCommand(ctx, CommandResult{Path: "mycli sub", Duration: time.Millisecond, ExitCode: 1})
 	c.RecordHelpFlagUsage(ctx, "mycli sub")
 	c.RecordError(ctx, "mycli sub", ErrorCategoryInternal)
 	if scope, ok := c.OptIn(); ok {
@@ -225,14 +330,28 @@ func TestClientDisabledIsZeroNetworkCalls(t *testing.T) {
 }
 
 func resourceAttr(srv *fakeotlp.Server, key string) (string, bool) {
-	for _, rm := range srv.Metrics() {
-		for _, kv := range rm.GetResource().GetAttributes() {
-			if kv.GetKey() == key {
-				return kv.GetValue().GetStringValue(), true
-			}
+	v := resourceAttrValue(srv, key)
+	return v.GetStringValue(), v != nil
+}
+
+// resourceAttrValue returns key from the resource of any exported signal.
+func resourceAttrValue(srv *fakeotlp.Server, key string) *commonpb.AnyValue {
+	var resources []*resourcepb.Resource
+	for _, r := range srv.Metrics() {
+		resources = append(resources, r.GetResource())
+	}
+	for _, r := range srv.Logs() {
+		resources = append(resources, r.GetResource())
+	}
+	for _, r := range srv.Traces() {
+		resources = append(resources, r.GetResource())
+	}
+	for _, res := range resources {
+		if v := fakeotlp.Attr(res.GetAttributes(), key); v != nil {
+			return v
 		}
 	}
-	return "", false
+	return nil
 }
 
 func TestNewWithoutEndpointDegradesToDisabled(t *testing.T) {
@@ -317,10 +436,8 @@ func TestNilClientMethodsNeverPanic(t *testing.T) {
 	}()
 
 	c.RecordSessionStart(ctx)
-	c.RecordSessionEnd(ctx)
 	c.RecordCommandInvocation(ctx, "x", nil)
-	c.RecordExitCode(ctx, "x", 1)
-	c.RecordLatency(ctx, "x", time.Second)
+	c.RecordCommand(ctx, CommandResult{Path: "x", ExitCode: 1})
 	c.RecordHelpFlagUsage(ctx, "x")
 	c.RecordError(ctx, "x", ErrorCategoryUnknown)
 	_ = c.Tier()
@@ -345,7 +462,7 @@ func TestQueueOverflowDropsWithoutBlocking(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 5000; i++ {
-			c.RecordExitCode(ctx, "mycli", i%2)
+			c.RecordCommand(ctx, CommandResult{Path: "mycli", ExitCode: i % 2})
 		}
 		close(done)
 	}()
@@ -353,6 +470,6 @@ func TestQueueOverflowDropsWithoutBlocking(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("RecordExitCode calls blocked under queue pressure")
+		t.Fatal("RecordCommand calls blocked under queue pressure")
 	}
 }

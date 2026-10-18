@@ -27,6 +27,7 @@ package cobrasdk
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -109,7 +110,7 @@ func WithoutHelpCapture() HookOption {
 // WithoutRunCapture disables the recursive RunE-wrapping InstrumentCobra
 // otherwise installs across the whole command tree, leaving only the
 // PersistentPreRunE-based command-invocation capture in place. Use this
-// if you want to call RecordExitCode/RecordLatency/RecordError yourself
+// if you want to call RecordCommand/RecordError yourself
 // (e.g. because you need the real OS exit code chosen in main(), which
 // Cobra's command tree never sees).
 func WithoutRunCapture() HookOption {
@@ -121,7 +122,7 @@ func WithoutRunCapture() HookOption {
 //
 //   - Command path + flag names (see argvio.Client.RecordCommandInvocation)
 //     are captured via a chained PersistentPreRunE on root.
-//   - Exit code, latency, and errors (see RecordExitCode, RecordLatency,
+//   - Exit code, latency, and errors (see RecordCommand and
 //     RecordError) are captured by wrapping RunE (or Run) on every
 //     command in the tree that has one, at the time InstrumentCobra is
 //     called — subcommands added to the tree afterward are not wrapped.
@@ -171,7 +172,7 @@ func installPreRun(root *cobra.Command, client *argvio.Client) {
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		ctx := context.WithValue(cmd.Context(), startTimeKey{}, time.Now())
 		cmd.SetContext(ctx)
-
+		client.RecordSessionStart(ctx)
 		client.RecordCommandInvocation(ctx, cmd.CommandPath(), changedFlagNames(cmd))
 
 		if existing != nil {
@@ -191,6 +192,7 @@ func installPreRun(root *cobra.Command, client *argvio.Client) {
 func installHelpCapture(root *cobra.Command, client *argvio.Client) {
 	existing := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		client.RecordSessionStart(cmd.Context())
 		client.RecordHelpFlagUsage(cmd.Context(), cmd.CommandPath())
 		if existing != nil {
 			existing(cmd, args)
@@ -211,34 +213,61 @@ func wrapRunE(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig) {
 		inner := cmd.RunE
 		cmd.RunE = func(c *cobra.Command, args []string) error {
 			err := inner(c, args)
-			recordOutcome(c, client, cfg, err)
+			code := 0
+			if err != nil {
+				code = 1
+			}
+			recordOutcome(c, client, cfg, err, code)
 			return err
 		}
 	case cmd.Run != nil:
 		inner := cmd.Run
 		cmd.RunE = func(c *cobra.Command, args []string) error {
 			inner(c, args)
-			recordOutcome(c, client, cfg, nil)
+			recordOutcome(c, client, cfg, nil, 0)
 			return nil
 		}
 		cmd.Run = nil
 	}
 }
 
-func recordOutcome(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig, err error) {
+// RecordExit records cmd as having finished with the given exit code, for
+// commands that end the process themselves (os.Exit, log.Fatal) from inside
+// their Run/RunE: that bypasses the wrapper InstrumentCobra installs, so
+// nothing would be recorded otherwise. Call it right before exiting, then
+// flush the client (Shutdown) since deferred calls won't run either:
+//
+//	if failed {
+//	    cobrasdk.RecordExit(cmd, client, 1)
+//	    _ = client.Shutdown(ctx)
+//	    os.Exit(1)
+//	}
+//
+// A non-zero code is also recorded as an error of unknown category. Safe to
+// call with a nil client.
+func RecordExit(cmd *cobra.Command, client *argvio.Client, code int) {
+	if cmd == nil {
+		return
+	}
+	var err error
+	if code != 0 {
+		err = errExitCode
+	}
+	recordOutcome(cmd, client, &hookConfig{classify: func(error) argvio.ErrorCategory { return argvio.ErrorCategoryUnknown }}, err, code)
+}
+
+// errExitCode stands in for the error a command exiting non-zero through
+// RecordExit didn't return.
+var errExitCode = errors.New("cobrasdk: command exited with a non-zero code")
+
+func recordOutcome(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig, err error, exitCode int) {
 	ctx := cmd.Context()
 	path := cmd.CommandPath()
-
+	result := argvio.CommandResult{Path: path, FlagNames: changedFlagNames(cmd), ExitCode: exitCode}
 	if start, ok := ctx.Value(startTimeKey{}).(time.Time); ok {
-		client.RecordLatency(ctx, path, time.Since(start))
+		result.Start, result.Duration = start, time.Since(start)
 	}
-
-	code := 0
-	if err != nil {
-		code = 1
-	}
-	client.RecordExitCode(ctx, path, code)
-
+	client.RecordCommand(ctx, result)
 	if err != nil {
 		client.RecordError(ctx, path, cfg.classify(err))
 	}

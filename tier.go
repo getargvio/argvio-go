@@ -16,16 +16,15 @@ type Tier int
 
 const (
 	// TierAnonymous permits no persistent or cross-invocation
-	// identifiers and the smallest field set: coarse command shape and
-	// aggregate counts only.
+	// identifiers: command name, exit code, duration, CLI version,
+	// OS/arch and CI environment only.
 	TierAnonymous Tier = iota
 
-	// TierBasic adds command path, flag names (not values), exit code,
-	// and latency.
+	// TierBasic adds an opaque per-process session ID, an opaque
+	// per-install ID, and flag names (never values).
 	TierBasic
 
-	// TierFull adds session correlation and redacted/typed error
-	// signatures.
+	// TierFull adds classified error types.
 	TierFull
 
 	// TierOptIn is the explicit opt-in tier: raw error detail (stack
@@ -36,14 +35,9 @@ const (
 )
 
 // String returns the wire value sent on the cli.analytics.tier resource
-// attribute.
-//
-// TODO(schema): these string values are provisional pending the
-// server-side allowlist file being pasted into this repo's task. They
-// MUST match the `public` server's semantic allowlist exactly, or the
-// server will reject/strip the resource attribute. Do not change these
-// independently of a corresponding server-side schema version — see
-// CONTRIBUTING.md.
+// attribute. These MUST match the consent_tiers names in the `public`
+// server's allowlist (schema/allowlist/v1.yaml in getargvio/argvio)
+// exactly, or the server rejects the record — see CONTRIBUTING.md.
 func (t Tier) String() string {
 	switch t {
 	case TierAnonymous:
@@ -53,7 +47,7 @@ func (t Tier) String() string {
 	case TierFull:
 		return "full"
 	case TierOptIn:
-		return "opt-in"
+		return "optin_plus"
 	default:
 		return "unknown"
 	}
@@ -65,7 +59,9 @@ func (t Tier) String() string {
 const ResourceAttrTier = "cli.analytics.tier"
 
 // ParseTier parses a wire tier string (as produced by Tier.String) back
-// into a Tier. It returns false if s does not match a known tier; the
+// into a Tier. "opt-in", the wire value before v0.2.0, is still accepted
+// so consent files written by older versions keep resolving. It returns
+// false if s does not match a known tier; the
 // zero value (TierAnonymous) is returned in that case so callers that
 // ignore the ok result fail closed to the least-privileged tier.
 func ParseTier(s string) (Tier, bool) {
@@ -76,7 +72,7 @@ func ParseTier(s string) (Tier, bool) {
 		return TierBasic, true
 	case "full":
 		return TierFull, true
-	case "opt-in":
+	case "optin_plus", "opt-in":
 		return TierOptIn, true
 	default:
 		return TierAnonymous, false

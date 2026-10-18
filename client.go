@@ -36,9 +36,11 @@ type Client struct {
 	tracer trace.Tracer
 	logger otellog.Logger
 
+	cliName       string
+	installIDPath string
+
 	latencyHist metric.Float64Histogram
 	invocations metric.Int64Counter
-	sessions    metric.Int64Counter
 	errorEvents metric.Int64Counter
 
 	counters *droppedCounters
@@ -48,6 +50,7 @@ type Client struct {
 	wg        sync.WaitGroup
 	shutdown  atomic.Bool
 	sessionID atomic.Pointer[string]
+	sessionOn atomic.Bool
 
 	exportTimeout   time.Duration
 	shutdownTimeout time.Duration
@@ -88,9 +91,7 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 	if cfg.endpoint == "" {
 		return disabledClient(), errNoEndpoint
 	}
-	if info, ok := DetectCI(); ok {
-		cfg.extraResourceAttrs = append(cfg.extraResourceAttrs, info.resourceAttributes()...)
-	}
+	cfg.ci, _ = DetectCI()
 
 	tier := resolveConsentTier(cfg)
 
@@ -135,15 +136,13 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		metric.WithDescription("Duration of a CLI command invocation."),
 	)
 	invocations, _ := meter.Int64Counter(
-		"cli.invocations",
-		metric.WithDescription("Count of CLI command invocations."),
-	)
-	sessions, _ := meter.Int64Counter(
-		"cli.sessions",
-		metric.WithDescription("Count of CLI process sessions."),
+		MetricCommandInvocations,
+		metric.WithUnit("1"),
+		metric.WithDescription("Count of completed CLI command invocations."),
 	)
 	errorEvents, _ := meter.Int64Counter(
-		"cli.errors",
+		MetricErrors,
+		metric.WithUnit("1"),
 		metric.WithDescription("Count of recorded CLI errors."),
 	)
 
@@ -154,9 +153,10 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		lp:              lp,
 		tracer:          tp.Tracer(instrumentationName),
 		logger:          lp.Logger(instrumentationName),
+		cliName:         cfg.cliName,
+		installIDPath:   resolveInstallIDPath(cfg),
 		latencyHist:     latencyHist,
 		invocations:     invocations,
-		sessions:        sessions,
 		errorEvents:     errorEvents,
 		counters:        &droppedCounters{},
 		jobs:            make(chan func(), cfg.queueSize),

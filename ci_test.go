@@ -2,6 +2,7 @@ package argvio
 
 import (
 	"context"
+	"runtime"
 	"testing"
 )
 
@@ -171,18 +172,18 @@ func TestCIInfo_ResourceAttributes(t *testing.T) {
 	if len(attrs) != 2 {
 		t.Fatalf("expected 2 attributes, got %d: %v", len(attrs), attrs)
 	}
-	if attrs[0].key != ResourceAttrCIProviderName || attrs[0].value != CIProviderGitHubActions {
-		t.Errorf("unexpected provider attribute: %v", attrs[0])
+	if string(attrs[0].Key) != ResourceAttrIsCI || !attrs[0].Value.AsBool() {
+		t.Errorf("unexpected is_ci attribute: %v", attrs[0])
 	}
-	if attrs[1].key != ResourceAttrCIPullRequest || attrs[1].value != "true" {
-		t.Errorf("unexpected isPR attribute: %v", attrs[1])
+	if string(attrs[1].Key) != ResourceAttrCIProvider || attrs[1].Value.AsString() != CIProviderGitHubActions {
+		t.Errorf("unexpected provider attribute: %v", attrs[1])
 	}
 }
 
-func TestCIInfo_ResourceAttributes_EmptyProviderReturnsNil(t *testing.T) {
-	info := CIInfo{}
-	if attrs := info.resourceAttributes(); attrs != nil {
-		t.Errorf("expected nil attributes for empty provider, got %v", attrs)
+func TestCIInfo_ResourceAttributes_NotCI(t *testing.T) {
+	attrs := CIInfo{}.resourceAttributes()
+	if len(attrs) != 1 || string(attrs[0].Key) != ResourceAttrIsCI || attrs[0].Value.AsBool() {
+		t.Errorf("expected only cli.is_ci=false outside CI, got %v", attrs)
 	}
 }
 
@@ -195,11 +196,20 @@ func TestNew_AttachesCIResourceAttributesAutomatically(t *testing.T) {
 	c.RecordSessionStart(context.Background())
 	flush(t, c)
 
-	if got, ok := resourceAttr(srv, ResourceAttrCIProviderName); !ok || got != CIProviderGitHubActions {
-		t.Errorf("%s: got %q (present=%v), want %q", ResourceAttrCIProviderName, got, ok, CIProviderGitHubActions)
+	if got, ok := resourceAttr(srv, ResourceAttrCIProvider); !ok || got != CIProviderGitHubActions {
+		t.Errorf("%s: got %q (present=%v), want %q", ResourceAttrCIProvider, got, ok, CIProviderGitHubActions)
 	}
-	if got, ok := resourceAttr(srv, ResourceAttrCIPullRequest); !ok || got != "true" {
-		t.Errorf("%s: got %q (present=%v), want %q", ResourceAttrCIPullRequest, got, ok, "true")
+	if got := resourceAttrValue(srv, ResourceAttrIsCI); !got.GetBoolValue() {
+		t.Errorf("%s: got %v, want true", ResourceAttrIsCI, got)
+	}
+	for key, want := range map[string]string{
+		ResourceAttrCLIVersion: "1.2.3",
+		ResourceAttrOS:         normalizeOS(runtime.GOOS),
+		ResourceAttrArch:       normalizeArch(runtime.GOARCH),
+	} {
+		if got, ok := resourceAttr(srv, key); !ok || got != want {
+			t.Errorf("%s: got %q (present=%v), want %q", key, got, ok, want)
+		}
 	}
 }
 

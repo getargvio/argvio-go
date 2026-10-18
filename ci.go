@@ -2,7 +2,8 @@ package argvio
 
 import (
 	"os"
-	"strconv"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // CI provider names reported on the ResourceAttrCIProviderName resource
@@ -19,8 +20,8 @@ const (
 
 // Resource attribute keys set automatically from DetectCI by New.
 const (
-	ResourceAttrCIProviderName = "cicd.provider.name"
-	ResourceAttrCIPullRequest  = "cicd.pipeline.is_pull_request"
+	ResourceAttrIsCI       = "cli.is_ci"
+	ResourceAttrCIProvider = "cli.ci_provider"
 )
 
 // CIInfo holds minimal information about the CI environment the process
@@ -77,15 +78,13 @@ func isTruthyPR(v string) bool {
 	return v != "" && v != "false"
 }
 
-// resourceAttributes maps info to the resource attribute key/value pairs
-// New attaches automatically. Returns nil for the zero value (no CI
-// detected).
-func (info CIInfo) resourceAttributes() []keyValue {
-	if info.Provider == "" {
-		return nil
+// resourceAttributes maps info to the resource attributes New attaches
+// automatically. cli.is_ci is always set, so the server can split CI from
+// interactive usage; cli.ci_provider only when CI was detected.
+func (info CIInfo) resourceAttributes() []attribute.KeyValue {
+	attrs := []attribute.KeyValue{attribute.Bool(ResourceAttrIsCI, info.Provider != "")}
+	if info.Provider != "" {
+		attrs = append(attrs, attribute.String(ResourceAttrCIProvider, info.Provider))
 	}
-	return []keyValue{
-		{ResourceAttrCIProviderName, info.Provider},
-		{ResourceAttrCIPullRequest, strconv.FormatBool(info.IsPullRequest)},
-	}
+	return attrs
 }

@@ -34,6 +34,9 @@ type config struct {
 	queueSize       int
 
 	extraResourceAttrs []keyValue
+
+	ci            CIInfo
+	installIDPath string
 }
 
 type keyValue struct {
