@@ -28,6 +28,7 @@ package cobrasdk
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -154,6 +155,8 @@ func InstrumentCobra(root *cobra.Command, client *argvio.Client, opts ...HookOpt
 		}
 	}
 
+	classifiers.Store(root, cfg.classify)
+
 	installPreRun(root, client)
 	if cfg.captureHelp {
 		installHelpCapture(root, client)
@@ -254,6 +257,49 @@ func RecordExit(cmd *cobra.Command, client *argvio.Client, code int) {
 		err = errExitCode
 	}
 	recordOutcome(cmd, client, &hookConfig{classify: func(error) argvio.ErrorCategory { return argvio.ErrorCategoryUnknown }}, err, code)
+}
+
+// RecordExitError is RecordExit for a command that ends the process itself
+// after a failure: err is classified into the argvio.ErrorCategory recorded
+// on cli.error.raised, instead of always being recorded as unknown.
+//
+//	if err != nil {
+//	    cobrasdk.RecordExitError(cmd, client, err, 1)
+//	    _ = client.Shutdown(ctx)
+//	    os.Exit(1)
+//	}
+//
+// The classifier is, in order of precedence: the WithErrorClassifier passed
+// in opts, the one passed to InstrumentCobra for cmd's command tree, or
+// argvio.ErrorCategoryUnknown. A non-nil err or a non-zero code is recorded
+// as an error; when err is nil and code is non-zero, the classifier is given
+// a placeholder error. Only WithErrorClassifier is read from opts. Safe to
+// call with a nil client.
+func RecordExitError(cmd *cobra.Command, client *argvio.Client, err error, code int, opts ...HookOption) {
+	if cmd == nil {
+		return
+	}
+	if err == nil && code != 0 {
+		err = errExitCode
+	}
+	cfg := &hookConfig{classify: classifierFor(cmd)}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(cfg)
+		}
+	}
+	recordOutcome(cmd, client, cfg, err, code)
+}
+
+// classifiers maps the root of each command tree passed to InstrumentCobra
+// to its error classifier, so RecordExitError can reuse it.
+var classifiers sync.Map // *cobra.Command -> func(error) argvio.ErrorCategory
+
+func classifierFor(cmd *cobra.Command) func(error) argvio.ErrorCategory {
+	if f, ok := classifiers.Load(cmd.Root()); ok {
+		return f.(func(error) argvio.ErrorCategory)
+	}
+	return func(error) argvio.ErrorCategory { return argvio.ErrorCategoryUnknown }
 }
 
 // errExitCode stands in for the error a command exiting non-zero through

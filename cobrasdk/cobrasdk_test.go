@@ -298,3 +298,137 @@ func TestRecordExitNilSafety(t *testing.T) {
 	root.SetContext(context.Background())
 	RecordExit(root, nil, 1)
 }
+
+// exitWith runs "sub" with a RunE that records its own exit through record,
+// the way a Fatal(cmd, err) helper would before calling os.Exit.
+func exitWith(t *testing.T, client *argvio.Client, instrument []HookOption, record func(*cobra.Command)) {
+	t.Helper()
+	root := newSampleCLI(nil)
+	root.Commands()[0].RunE = func(cmd *cobra.Command, _ []string) error {
+		record(cmd)
+		return nil
+	}
+	InstrumentCobra(root, client, append(instrument, WithoutRunCapture())...)
+	root.SetArgs([]string{"sub"})
+	root.SetOut(&bytes.Buffer{})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	flush(t, client)
+}
+
+func errorType(t *testing.T, srv *fakeotlp.Server) string {
+	t.Helper()
+	got, ok := eventAttr(srv, argvio.EventErrorRaised, argvio.AttrErrorType)
+	if !ok {
+		t.Fatal("expected a cli.error.raised event")
+	}
+	return got
+}
+
+func TestRecordExitErrorUsesPerCallClassifier(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	boom := errors.New("boom")
+	var classified error
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, boom, 1, WithErrorClassifier(func(err error) argvio.ErrorCategory {
+			classified = err
+			return argvio.ErrorCategoryNetwork
+		}))
+	})
+
+	if classified != boom {
+		t.Fatalf("classifier got %v, want %v", classified, boom)
+	}
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryNetwork) {
+		t.Fatalf("error type = %q, want %q", got, argvio.ErrorCategoryNetwork)
+	}
+	span := srv.Span(argvio.SpanCommandPrefix + "sub")
+	if span == nil {
+		t.Fatal("expected a cli.command.sub span")
+	}
+	if code := fakeotlp.Attr(span.GetAttributes(), argvio.AttrExitCode).GetIntValue(); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+}
+
+func TestRecordExitErrorReusesInstrumentCobraClassifier(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, []HookOption{WithErrorClassifier(func(error) argvio.ErrorCategory {
+		return argvio.ErrorCategoryValidation
+	})}, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1)
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryValidation) {
+		t.Fatalf("error type = %q, want %q", got, argvio.ErrorCategoryValidation)
+	}
+}
+
+func TestRecordExitErrorPerCallClassifierOverridesInstrumentCobra(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, []HookOption{WithErrorClassifier(func(error) argvio.ErrorCategory {
+		return argvio.ErrorCategoryValidation
+	})}, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1, WithErrorClassifier(func(error) argvio.ErrorCategory {
+			return argvio.ErrorCategoryNetwork
+		}))
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryNetwork) {
+		t.Fatalf("error type = %q, want %q", got, argvio.ErrorCategoryNetwork)
+	}
+}
+
+func TestRecordExitErrorWithoutClassifierIsUnknown(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1)
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryUnknown) {
+		t.Fatalf("error type = %q, want %q", got, argvio.ErrorCategoryUnknown)
+	}
+}
+
+func TestRecordExitErrorNilErrorWithNonZeroCodeIsRecorded(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, nil, 2)
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryUnknown) {
+		t.Fatalf("error type = %q, want %q", got, argvio.ErrorCategoryUnknown)
+	}
+}
+
+func TestRecordExitErrorSuccessRecordsNoError(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, nil, 0)
+	})
+
+	if hasEvent(srv, argvio.EventErrorRaised) {
+		t.Fatal("did not expect a cli.error.raised event for a zero exit")
+	}
+}
+
+func TestRecordExitStaysUnclassified(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, []HookOption{WithErrorClassifier(func(error) argvio.ErrorCategory {
+		return argvio.ErrorCategoryValidation
+	})}, func(cmd *cobra.Command) {
+		RecordExit(cmd, client, 1)
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryUnknown) {
+		t.Fatalf("error type = %q, want %q", got, argvio.ErrorCategoryUnknown)
+	}
+}
+
+func TestRecordExitErrorNilSafety(t *testing.T) {
+	RecordExitError(nil, nil, errors.New("boom"), 1)
+	root := newSampleCLI(nil)
+	root.SetContext(context.Background())
+	RecordExitError(root, nil, errors.New("boom"), 1)
+}
