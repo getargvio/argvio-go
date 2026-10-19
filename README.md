@@ -96,8 +96,8 @@ and is shaped by the tier the current session resolved to:
 
 | Tier | Adds |
 |---|---|
-| `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers |
-| `Basic` | command path, flag names, session and install IDs, error types, feature activations, process resource usage, binary size and startup overhead |
+| `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters (`RecordCounter`, see below) |
+| `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead |
 | `Full` | reserved: nothing beyond `Basic` in this SDK |
 | `Opt-in+` | raw error messages and stack traces, via `Client.OptIn()` only |
 
@@ -109,6 +109,36 @@ at `TierOptIn`). Server-side allowlist stripping is a backstop, not the
 primary mechanism. See [docs/consent.md](docs/consent.md) for the full
 model, how `ConsentProvider` resolves the tier, and how to write your
 own.
+
+## Error reasons
+
+`RecordError` accepts `argvio.WithReason("no-token")`, and the Cobra hooks
+`cobrasdk.WithErrorReason` / `cobrasdk.WithErrorClassification` (category
+and reason from one call, also used by `RecordExitError`): a fixed-vocabulary
+cause within the error's category, sent as `cli.error.reason` at `Basic` and
+above. It must match `^[a-z0-9][a-z0-9._-]*$` (at most 64 bytes) or it is
+dropped. Never derive it from the error's text or user input; the SDK does
+not scrub it.
+
+## Product counters
+
+```go
+client.RecordCounter(ctx, "openapi.scheme", 1, argvio.WithLabel("bearer"))
+```
+
+Counts something specific to your product, with an optional label. Calls
+are summed in memory and sent as one data point per name and label when the
+client flushes, so a hot loop is cheap. A non-positive `n`, or a name or
+label that is not `^[a-z0-9][a-z0-9._-]*$` or is over 64 bytes, is dropped
+(not scrubbed).
+
+> **Warning: counters are accepted at the anonymous tier.** They are sent
+> even from CI and when the user has made no consent choice. The name and label
+> go out as-is, so they must be fixed identifiers chosen in code, **never
+> user input, file paths, host names, URLs, tokens or anything derived from
+> them.** What is sent: the name, the label, the command name, and the usual
+> CLI version, OS, architecture and CI flag; no session or install ID. See
+> [docs/consent.md](docs/consent.md#product-counters-are-accepted-at-the-anonymous-tier).
 
 ## Pointing at a collector
 

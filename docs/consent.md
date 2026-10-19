@@ -43,6 +43,7 @@ numbers even from users who've never made a choice.
 | `RecordHelpFlagUsage` | a bare "help was used" event, no command path |
 | `RecordError` | `cli.errors` counter increment by command; no category, no event |
 | `RecordFeatureActivated` | nothing |
+| `RecordCounter` | a `cli.counter` data point: counter name, optional label, command name (see [Product counters](#product-counters-are-accepted-at-the-anonymous-tier)) |
 
 ### TierBasic
 
@@ -81,6 +82,14 @@ Also adds:
 - `RecordError` starts emitting a `cli.error.raised` event: category
   (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
   a message or stack trace — see TierOptIn.
+- `RecordError` with `WithReason` adds a vendor-assigned reason,
+  `cli.error.reason`, to both that event and the `cli.errors` counter: a
+  finer cause within the category (for example `"no-token"`). It is a
+  fixed identifier your code chooses, never the error's text, and nothing
+  is sent for it at `TierAnonymous`. It must match
+  `^[a-z0-9][a-z0-9._-]*$` and be at most 64 bytes; a reason that doesn't
+  is dropped (the error is still recorded without it), not scrubbed or
+  truncated. See [Error reasons](#error-reasons).
 
 ### TierFull
 
@@ -159,6 +168,49 @@ the same CLI rather than against other CLIs. `cobrasdk` calls
 the figure is meant to measure; if you call it yourself, do so at the same
 place in every release. A startup of 0 ms is a real measurement and is
 sent; a value that can't be measured is omitted, never sent as zero.
+
+## Error reasons
+
+`RecordError` takes an optional `WithReason(reason)`, and the Cobra hooks an
+optional `WithErrorReason` (or `WithErrorClassification`, which returns the
+category and the reason from one call). The reason is sent as
+`cli.error.reason` on the `cli.error.raised` event and the `cli.errors`
+counter, at `TierBasic` and above only.
+
+It exists so a vendor with a short, fixed list of failure causes (`"no-token"`,
+`"invalid-url"`, `"config-unreadable"`) can tell them apart within a category.
+It must be a code-defined identifier, never the error's message, anything
+derived from user input, or a path, host name, URL or token. The SDK does not
+scrub it: it only drops a value that does not match `^[a-z0-9][a-z0-9._-]*$`
+or is longer than 64 bytes. Raw error text is a different, opt-in-only field
+(see [TierOptIn](#tieroptin)).
+
+## Product counters are accepted at the anonymous tier
+
+> **Warning.** `RecordCounter` is accepted at **every** tier, including
+> `TierAnonymous`: a counter is sent from CI, where the tier is capped at
+> anonymous, and whenever the user has made no consent choice. Only
+> `DO_NOT_TRACK`, `WithDisabled` or a disabled client stop it. Its name
+> and label are strings your code chooses and the SDK sends as-is, so they
+> must be **fixed identifiers chosen in code** (`"openapi.scheme"`,
+> `"bearer"`), **never user input, file paths, host names, URLs, tokens, or
+> anything derived from them.**
+
+What is sent, per distinct counter name, label and command:
+
+| Attribute | Tier | Notes |
+|---|---|---|
+| `cli.counter.name` | Anonymous | required; `^[a-z0-9][a-z0-9._-]*$`, at most 64 bytes |
+| `cli.counter.label` | Anonymous | optional, via `WithLabel`; same rules |
+| `cli.command.name` | Anonymous | the command last passed to `RecordCommandInvocation`, when there was one |
+| the value | Anonymous | a monotonic sum, unit `1` |
+| `cli.version`, `cli.os`, `cli.arch`, `cli.is_ci` | Anonymous | the resource attributes every signal carries |
+
+No session or install ID is attached, at any tier. A name or label that does
+not match the pattern, or is longer than 64 bytes, is dropped along with its
+counter rather than scrubbed or truncated; a non-positive increment is
+ignored. Increments are summed in memory and sent as one data point per name
+and label when the client flushes, not one record per call.
 
 ## What's never captured, at any tier
 

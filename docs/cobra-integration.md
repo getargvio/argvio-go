@@ -143,6 +143,15 @@ cobrasdk.InstrumentCobra(rootCmd, client,
   category from an error's message or type (see the root module's
   PII-scrubbing non-goal) — only your own error handling knows which of
   your errors are user mistakes vs. network failures vs. internal bugs.
+- **`WithErrorReason(func(error) string)`** — maps a `RunE` error to a
+  vendor-assigned reason (`"no-token"`, `"invalid-url"`), sent as
+  `cli.error.reason` at `TierBasic`+. Return `""` for none. It must be a
+  fixed identifier matching `^[a-z0-9][a-z0-9._-]*$` (at most 64 bytes),
+  never the error's text; a value that doesn't match is dropped.
+- **`WithErrorClassification(func(error) (argvio.ErrorCategory, string))`**
+  — `WithErrorClassifier` and `WithErrorReason` in one function, called
+  once per error, so category and reason come from the same `switch`. The
+  last of these three options given wins.
 - **`WithoutHelpCapture()`** — skip the `SetHelpFunc` wiring, if you
   have your own help instrumentation you don't want touched.
 - **`WithoutRunCapture()`** — skip the recursive `RunE` wrapping, if you
@@ -164,9 +173,12 @@ func Fatal(cmd *cobra.Command, err error) {
 }
 ```
 
-`RecordExitError` classifies `err` with, in order of precedence, a
-`WithErrorClassifier` passed to the call itself, the one you gave
-`InstrumentCobra` for that command tree, or `ErrorCategoryUnknown`. Use
+`RecordExitError` classifies `err` (category and reason) with, in order of
+precedence, the `WithErrorClassifier`, `WithErrorReason` or
+`WithErrorClassification` passed to the call itself, the ones you gave
+`InstrumentCobra` for that command tree, or `ErrorCategoryUnknown` and no
+reason; a per-call option overrides the tree's one by one, and a
+`WithErrorClassification` replaces both. Use
 `RecordExit(cmd, client, code)` when there is no error to classify; a
 non-zero code is then always recorded as `ErrorCategoryUnknown`.
 

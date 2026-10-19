@@ -432,3 +432,118 @@ func TestRecordExitErrorNilSafety(t *testing.T) {
 	root.SetContext(context.Background())
 	RecordExitError(root, nil, errors.New("boom"), 1)
 }
+
+func errorReason(srv *fakeotlp.Server) (string, bool) {
+	return eventAttr(srv, argvio.EventErrorRaised, argvio.AttrErrorReason)
+}
+
+func TestInstrumentCobraRecordsErrorReason(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	root := newSampleCLI(nil)
+	root.AddCommand(&cobra.Command{Use: "fail", RunE: func(*cobra.Command, []string) error { return errors.New("boom") }})
+	InstrumentCobra(root, client, WithErrorReason(func(error) string { return "no-token" }))
+	root.SetArgs([]string{"fail"})
+	root.SilenceErrors, root.SilenceUsage = true, true
+	_ = root.Execute()
+	flush(t, client)
+
+	if got, ok := errorReason(srv); !ok || got != "no-token" {
+		t.Fatalf("reason = (%q, %v), want no-token", got, ok)
+	}
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryUnknown) {
+		t.Fatalf("category = %q, want the default %q", got, argvio.ErrorCategoryUnknown)
+	}
+}
+
+func TestWithErrorClassificationCallsOnceForBoth(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	calls := 0
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1, WithErrorClassification(func(error) (argvio.ErrorCategory, string) {
+			calls++
+			return argvio.ErrorCategoryAuth, "no-token"
+		}))
+	})
+
+	if calls != 1 {
+		t.Fatalf("classifier called %d times, want 1", calls)
+	}
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryAuth) {
+		t.Fatalf("category = %q, want auth", got)
+	}
+	if got, _ := errorReason(srv); got != "no-token" {
+		t.Fatalf("reason = %q, want no-token", got)
+	}
+}
+
+func TestRecordExitErrorReusesInstrumentCobraReason(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, []HookOption{WithErrorClassification(func(error) (argvio.ErrorCategory, string) {
+		return argvio.ErrorCategoryValidation, "invalid-url"
+	})}, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1)
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryValidation) {
+		t.Fatalf("category = %q, want validation", got)
+	}
+	if got, _ := errorReason(srv); got != "invalid-url" {
+		t.Fatalf("reason = %q, want invalid-url", got)
+	}
+}
+
+func TestRecordExitErrorPerCallOptionsOverrideTreeOneByOne(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, []HookOption{
+		WithErrorClassifier(func(error) argvio.ErrorCategory { return argvio.ErrorCategoryValidation }),
+		WithErrorReason(func(error) string { return "tree-reason" }),
+	}, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1,
+			WithErrorReason(func(error) string { return "call-reason" }))
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryValidation) {
+		t.Fatalf("category = %q, want the tree's validation", got)
+	}
+	if got, _ := errorReason(srv); got != "call-reason" {
+		t.Fatalf("reason = %q, want call-reason", got)
+	}
+}
+
+func TestLaterClassifierOptionReplacesEarlierOnes(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1,
+			WithErrorClassification(func(error) (argvio.ErrorCategory, string) { return argvio.ErrorCategoryAuth, "first" }),
+			WithErrorClassifier(func(error) argvio.ErrorCategory { return argvio.ErrorCategoryNetwork }),
+		)
+	})
+
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryNetwork) {
+		t.Fatalf("category = %q, want network", got)
+	}
+	if got, ok := errorReason(srv); ok {
+		t.Fatalf("the combined classifier was replaced, reason = %q", got)
+	}
+}
+
+func TestRecordExitStaysWithoutReason(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, []HookOption{WithErrorReason(func(error) string { return "tree-reason" })}, func(cmd *cobra.Command) {
+		RecordExit(cmd, client, 1)
+	})
+
+	if got, ok := errorReason(srv); ok {
+		t.Fatalf("RecordExit is unclassified, reason = %q", got)
+	}
+}
+
+func TestNilClassifierOptionsAreIgnored(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierFull)
+	exitWith(t, client, nil, func(cmd *cobra.Command) {
+		RecordExitError(cmd, client, errors.New("boom"), 1, WithErrorReason(nil), WithErrorClassification(nil), nil)
+	})
+	if got := errorType(t, srv); got != string(argvio.ErrorCategoryUnknown) {
+		t.Fatalf("category = %q, want unknown", got)
+	}
+}
