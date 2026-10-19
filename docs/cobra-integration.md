@@ -149,6 +149,27 @@ cobrasdk.InstrumentCobra(rootCmd, client,
   want to call `RecordExitCode`/`RecordLatency`/`RecordError` yourself
   (e.g. to record the real OS exit code — see above).
 
+## Commands that exit the process themselves
+
+A command that calls `os.Exit` (or a helper like `Fatal(cmd, err)`) from
+inside its `Run`/`RunE` bypasses the `RunE` wrapper, so record the exit
+yourself right before exiting, then flush the client:
+
+```go
+func Fatal(cmd *cobra.Command, err error) {
+	log.Print(err)
+	cobrasdk.RecordExitError(cmd, client, err, 1)
+	_ = client.Shutdown(context.Background())
+	os.Exit(1)
+}
+```
+
+`RecordExitError` classifies `err` with, in order of precedence, a
+`WithErrorClassifier` passed to the call itself, the one you gave
+`InstrumentCobra` for that command tree, or `ErrorCategoryUnknown`. Use
+`RecordExit(cmd, client, code)` when there is no error to classify; a
+non-zero code is then always recorded as `ErrorCategoryUnknown`.
+
 ## A known limitation: persistent hooks on subcommands
 
 Cobra only runs the *first* `PersistentPreRunE` it finds walking from
