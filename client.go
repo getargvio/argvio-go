@@ -46,6 +46,7 @@ type Client struct {
 	latencyHist metric.Float64Histogram
 	invocations metric.Int64Counter
 	errorEvents metric.Int64Counter
+	counter     metric.Int64Counter
 
 	counters *droppedCounters
 
@@ -153,6 +154,12 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		metric.WithDescription("Count of recorded CLI errors."),
 	)
 
+	counter, _ := meter.Int64Counter(
+		MetricCounter,
+		metric.WithUnit("1"),
+		metric.WithDescription("Vendor-defined product counter."),
+	)
+
 	c := &Client{
 		tier:            tier,
 		tp:              tp,
@@ -166,6 +173,7 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		latencyHist:     latencyHist,
 		invocations:     invocations,
 		errorEvents:     errorEvents,
+		counter:         counter,
 		counters:        &droppedCounters{},
 		jobs:            make(chan func(), cfg.queueSize),
 		stopCh:          make(chan struct{}),

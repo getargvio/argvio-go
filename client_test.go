@@ -651,3 +651,87 @@ func TestQueueOverflowDropsWithoutBlocking(t *testing.T) {
 		t.Fatal("RecordCommand calls blocked under queue pressure")
 	}
 }
+
+func TestRecordErrorReasonIsSentAtBasicTierAndAbove(t *testing.T) {
+	for _, tier := range []Tier{TierBasic, TierFull, TierOptIn} {
+		t.Run(tier.String(), func(t *testing.T) {
+			c, srv := newTestClient(t, tier)
+			c.RecordError(context.Background(), "testcli sub", ErrorCategoryAuth, WithReason("no-token"))
+			flush(t, c)
+
+			if got, ok := logAttr(srv, EventErrorRaised, AttrErrorReason); !ok || got != "no-token" {
+				t.Fatalf("reason on the event = (%q, %v), want no-token", got, ok)
+			}
+			if got, _ := logAttr(srv, EventErrorRaised, AttrErrorType); got != "auth" {
+				t.Fatalf("category = %q, want auth", got)
+			}
+			if got, ok := errorsMetricAttr(srv, AttrErrorReason); !ok || got != "no-token" {
+				t.Fatalf("reason on cli.errors = (%q, %v), want no-token", got, ok)
+			}
+		})
+	}
+}
+
+func TestRecordErrorReasonIsNotSentAtAnonymousTier(t *testing.T) {
+	c, srv := newTestClient(t, TierAnonymous)
+	c.RecordError(context.Background(), "testcli sub", ErrorCategoryAuth, WithReason("no-token"))
+	flush(t, c)
+
+	if _, ok := errorsMetricAttr(srv, AttrErrorReason); ok {
+		t.Fatal("TierAnonymous must not send the reason on cli.errors")
+	}
+	if _, ok := errorsMetricAttr(srv, AttrCommandName); !ok {
+		t.Fatal("the error must still be counted at TierAnonymous")
+	}
+	if len(allLogEventNames(srv)) != 0 {
+		t.Fatalf("TierAnonymous must not emit an error event, got %v", allLogEventNames(srv))
+	}
+}
+
+func TestRecordErrorDropsInvalidReason(t *testing.T) {
+	long := strings.Repeat("a", maxIdentifierLength+1)
+	for _, reason := range []string{"", "Invalid URL", "failed to read config file", "/home/me/x", "UPPER", "-lead", long} {
+		c, srv := newTestClient(t, TierBasic)
+		c.RecordError(context.Background(), "testcli sub", ErrorCategoryUser, WithReason(reason), nil)
+		flush(t, c)
+
+		if _, ok := logAttr(srv, EventErrorRaised, AttrErrorReason); ok {
+			t.Errorf("reason %q must be dropped from the event", reason)
+		}
+		if _, ok := errorsMetricAttr(srv, AttrErrorReason); ok {
+			t.Errorf("reason %q must be dropped from cli.errors", reason)
+		}
+		if got, _ := logAttr(srv, EventErrorRaised, AttrErrorType); got != "user" {
+			t.Errorf("reason %q: the error must still be recorded with its category, got %q", reason, got)
+		}
+	}
+}
+
+func TestRecordErrorWithoutReasonIsUnchanged(t *testing.T) {
+	c, srv := newTestClient(t, TierFull)
+	c.RecordError(context.Background(), "testcli sub", ErrorCategoryNetwork)
+	flush(t, c)
+
+	if _, ok := logAttr(srv, EventErrorRaised, AttrErrorReason); ok {
+		t.Fatal("no reason was given, none may be sent")
+	}
+}
+
+// errorsMetricAttr returns key from the first cli.errors data point.
+func errorsMetricAttr(srv *fakeotlp.Server, key string) (string, bool) {
+	for _, rm := range srv.Metrics() {
+		for _, sm := range rm.GetScopeMetrics() {
+			for _, m := range sm.GetMetrics() {
+				if m.GetName() != MetricErrors {
+					continue
+				}
+				for _, dp := range m.GetSum().GetDataPoints() {
+					if v := fakeotlp.Attr(dp.GetAttributes(), key); v != nil {
+						return v.GetStringValue(), true
+					}
+				}
+			}
+		}
+	}
+	return "", false
+}

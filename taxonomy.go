@@ -40,8 +40,14 @@ const (
 	AttrInstallMethod = "cli.install.method"
 	AttrFeature       = "cli.activation.feature" // TierBasic+
 	AttrErrorType     = "cli.error.type"         // TierBasic+
+	AttrErrorReason   = "cli.error.reason"       // TierBasic+
 	AttrErrorMessage  = "cli.error.message"      // TierOptIn only
 	AttrErrorStack    = "cli.error.stacktrace"   // TierOptIn only
+
+	// Vendor-defined counters on the cli.counter metric, accepted at every
+	// tier including TierAnonymous. See RecordCounter.
+	AttrCounterName  = "cli.counter.name"
+	AttrCounterLabel = "cli.counter.label"
 
 	// Process-wide resource usage on the command span, omitted where the
 	// platform can't measure it. See RecordCommand.
@@ -75,6 +81,7 @@ const (
 	MetricCommandInvocations = "cli.command.invocations"
 	MetricCommandDuration    = "cli.command.duration" // milliseconds
 	MetricErrors             = "cli.errors"
+	MetricCounter            = "cli.counter"
 )
 
 // maxCommandNameLength is the server's max_length for cli.command.name.
@@ -82,6 +89,30 @@ const maxCommandNameLength = 128
 
 // maxFeatureLength is the server's max_length for cli.activation.feature.
 const maxFeatureLength = 64
+
+// maxIdentifierLength is the server's max_length for cli.error.reason,
+// cli.counter.name and cli.counter.label.
+const maxIdentifierLength = 64
+
+// validIdentifier reports whether s matches the server's pattern for
+// vendor-chosen identifiers, ^[a-z0-9][a-z0-9._-]*$, and is at most 64
+// bytes. Values that don't are dropped rather than scrubbed, so free text
+// never reaches the wire.
+func validIdentifier(s string) bool {
+	if s == "" || len(s) > maxIdentifierLength {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch >= 'a' && ch <= 'z', ch >= '0' && ch <= '9':
+		case i > 0 && (ch == '.' || ch == '_' || ch == '-'):
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // ErrorCategory is a coarse, vendor-assigned classification of an error
 // — deliberately not the error's message or type name, both of which
@@ -453,6 +484,26 @@ func (c *Client) RecordHelpFlagUsage(ctx context.Context, commandPath string) {
 
 // --- Errors --------------------------------------------------------
 
+// ErrorOption configures RecordError.
+type ErrorOption func(*errorConfig)
+
+type errorConfig struct {
+	reason string
+}
+
+// WithReason attaches a vendor-assigned reason to the error: a finer,
+// fixed-vocabulary cause within its category (for example "no-token" or
+// "invalid-url"), sent as cli.error.reason at TierBasic+.
+//
+// reason must be a fixed identifier chosen by the vendor in code, never the
+// error's message or anything derived from user input. It is sent as-is and
+// this SDK does not scrub it, but it must match ^[a-z0-9][a-z0-9._-]*$ and
+// be at most 64 bytes: a reason that doesn't is dropped, and the error is
+// still recorded without one.
+func WithReason(reason string) ErrorOption {
+	return func(c *errorConfig) { c.reason = reason }
+}
+
 // RecordError records that a command failed with an error, classified
 // by category rather than its raw message or stack trace. This is
 // deliberately the only error-recording capability available below
@@ -464,7 +515,8 @@ func (c *Client) RecordHelpFlagUsage(ctx context.Context, commandPath string) {
 // At every tier this counts the error on the cli.errors metric by
 // command. At TierBasic+ the category is attached as the error type and a
 // cli.error.raised event is emitted too, tied to the session and install.
-func (c *Client) RecordError(ctx context.Context, commandPath string, category ErrorCategory) {
+// WithReason adds a vendor-assigned reason to both, at TierBasic+ only.
+func (c *Client) RecordError(ctx context.Context, commandPath string, category ErrorCategory, opts ...ErrorOption) {
 	defer recoverGuard(nil)
 	if !c.enabled() {
 		return
@@ -472,10 +524,19 @@ func (c *Client) RecordError(ctx context.Context, commandPath string, category E
 	if !category.valid() {
 		category = ErrorCategoryUnknown
 	}
+	var cfg errorConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
 	attrs := []attribute.KeyValue{attribute.String(AttrCommandName, c.commandName(commandPath))}
 	basic := c.tier.Allows(TierBasic)
 	if basic {
 		attrs = append(attrs, attribute.String(AttrErrorType, string(category)))
+		if validIdentifier(cfg.reason) {
+			attrs = append(attrs, attribute.String(AttrErrorReason, cfg.reason))
+		}
 	}
 	metricAttrs := append([]attribute.KeyValue{c.tierAttr()}, attrs...)
 	sessionID := c.ensureSessionID()

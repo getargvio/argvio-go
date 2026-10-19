@@ -78,9 +78,32 @@ func Instrument(root *cobra.Command, apiKey string, opts ...argvio.Option) (*arg
 // hookConfig holds InstrumentCobra's optional behavior. Kept
 // unexported; configured via HookOption.
 type hookConfig struct {
-	classify    func(error) argvio.ErrorCategory
+	// category and reason classify an error separately; both classifies it
+	// in one call and takes precedence over the two when set. Each option
+	// clears the fields it supersedes, so the last one given wins.
+	category func(error) argvio.ErrorCategory
+	reason   func(error) string
+	both     func(error) (argvio.ErrorCategory, string)
+
 	captureHelp bool
 	captureRunE bool
+}
+
+// classify returns the category and reason for err, calling the vendor's
+// classifier once when it returns both. The category defaults to
+// argvio.ErrorCategoryUnknown and the reason to none (empty).
+func (c *hookConfig) classify(err error) (argvio.ErrorCategory, string) {
+	if c.both != nil {
+		return c.both(err)
+	}
+	category, reason := argvio.ErrorCategoryUnknown, ""
+	if c.category != nil {
+		category = c.category(err)
+	}
+	if c.reason != nil {
+		reason = c.reason(err)
+	}
+	return category, reason
 }
 
 // HookOption configures InstrumentCobra.
@@ -96,7 +119,39 @@ type HookOption func(*hookConfig)
 func WithErrorClassifier(f func(error) argvio.ErrorCategory) HookOption {
 	return func(c *hookConfig) {
 		if f != nil {
-			c.classify = f
+			c.category, c.both = f, nil
+		}
+	}
+}
+
+// WithErrorReason supplies a function that maps an error to a
+// vendor-assigned reason: a finer, fixed-vocabulary cause within its
+// category (for example "no-token", "invalid-url"), sent as cli.error.reason
+// at TierBasic and above. Return "" for an error with no reason.
+//
+// The reason must be a fixed identifier chosen in code, never the error's
+// message or anything derived from user input: it is sent as-is, this
+// package does not scrub it, and it is dropped unless it matches
+// ^[a-z0-9][a-z0-9._-]*$ and is at most 64 bytes (see argvio.WithReason).
+// To get the category and the reason from one call, use
+// WithErrorClassification instead.
+func WithErrorReason(f func(error) string) HookOption {
+	return func(c *hookConfig) {
+		if f != nil {
+			c.reason, c.both = f, nil
+		}
+	}
+}
+
+// WithErrorClassification is WithErrorClassifier and WithErrorReason in one
+// function: it returns both the category and the reason for an error, in a
+// single call, so the two can come from the same switch. It replaces any
+// classifier or reason function given before it, and is replaced by any
+// given after it.
+func WithErrorClassification(f func(error) (argvio.ErrorCategory, string)) HookOption {
+	return func(c *hookConfig) {
+		if f != nil {
+			c.both, c.category, c.reason = f, nil, nil
 		}
 	}
 }
@@ -144,18 +199,14 @@ func InstrumentCobra(root *cobra.Command, client *argvio.Client, opts ...HookOpt
 	if root == nil {
 		return
 	}
-	cfg := &hookConfig{
-		classify:    func(error) argvio.ErrorCategory { return argvio.ErrorCategoryUnknown },
-		captureHelp: true,
-		captureRunE: true,
-	}
+	cfg := &hookConfig{captureHelp: true, captureRunE: true}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)
 		}
 	}
 
-	classifiers.Store(root, cfg.classify)
+	classifiers.Store(root, cfg)
 
 	installPreRun(root, client)
 	if cfg.captureHelp {
@@ -256,7 +307,7 @@ func RecordExit(cmd *cobra.Command, client *argvio.Client, code int) {
 	if code != 0 {
 		err = errExitCode
 	}
-	recordOutcome(cmd, client, &hookConfig{classify: func(error) argvio.ErrorCategory { return argvio.ErrorCategoryUnknown }}, err, code)
+	recordOutcome(cmd, client, &hookConfig{}, err, code)
 }
 
 // RecordExitError is RecordExit for a command that ends the process itself
@@ -269,12 +320,14 @@ func RecordExit(cmd *cobra.Command, client *argvio.Client, code int) {
 //	    os.Exit(1)
 //	}
 //
-// The classifier is, in order of precedence: the WithErrorClassifier passed
-// in opts, the one passed to InstrumentCobra for cmd's command tree, or
-// argvio.ErrorCategoryUnknown. A non-nil err or a non-zero code is recorded
-// as an error; when err is nil and code is non-zero, the classifier is given
-// a placeholder error. Only WithErrorClassifier is read from opts. Safe to
-// call with a nil client.
+// The category and reason come from the WithErrorClassifier,
+// WithErrorReason and WithErrorClassification options passed in opts, over
+// those passed to InstrumentCobra for cmd's command tree, over
+// argvio.ErrorCategoryUnknown and no reason. Where opts and the tree both
+// set one, opts wins; a WithErrorClassification in opts replaces both of the
+// tree's. A non-nil err or a non-zero code is recorded as an error; when err
+// is nil and code is non-zero, the classifier is given a placeholder error.
+// Other options in opts are ignored. Safe to call with a nil client.
 func RecordExitError(cmd *cobra.Command, client *argvio.Client, err error, code int, opts ...HookOption) {
 	if cmd == nil {
 		return
@@ -282,7 +335,7 @@ func RecordExitError(cmd *cobra.Command, client *argvio.Client, err error, code 
 	if err == nil && code != 0 {
 		err = errExitCode
 	}
-	cfg := &hookConfig{classify: classifierFor(cmd)}
+	cfg := classifierFor(cmd)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)
@@ -292,14 +345,17 @@ func RecordExitError(cmd *cobra.Command, client *argvio.Client, err error, code 
 }
 
 // classifiers maps the root of each command tree passed to InstrumentCobra
-// to its error classifier, so RecordExitError can reuse it.
-var classifiers sync.Map // *cobra.Command -> func(error) argvio.ErrorCategory
+// to its hook config, so RecordExitError can reuse its classifiers.
+var classifiers sync.Map // *cobra.Command -> *hookConfig
 
-func classifierFor(cmd *cobra.Command) func(error) argvio.ErrorCategory {
+// classifierFor returns a copy of the classifiers InstrumentCobra was given
+// for cmd's command tree, which the caller may override option by option.
+func classifierFor(cmd *cobra.Command) *hookConfig {
+	cfg := &hookConfig{}
 	if f, ok := classifiers.Load(cmd.Root()); ok {
-		return f.(func(error) argvio.ErrorCategory)
+		*cfg = *f.(*hookConfig)
 	}
-	return func(error) argvio.ErrorCategory { return argvio.ErrorCategoryUnknown }
+	return cfg
 }
 
 // errExitCode stands in for the error a command exiting non-zero through
@@ -315,7 +371,8 @@ func recordOutcome(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig, e
 	}
 	client.RecordCommand(ctx, result)
 	if err != nil {
-		client.RecordError(ctx, path, cfg.classify(err))
+		category, reason := cfg.classify(err)
+		client.RecordError(ctx, path, category, argvio.WithReason(reason))
 	}
 }
 
