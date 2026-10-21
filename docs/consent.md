@@ -44,6 +44,7 @@ numbers even from users who've never made a choice.
 | `RecordError` | `cli.errors` counter increment by command; no category, no event |
 | `RecordFeatureActivated` | nothing |
 | `RecordCounter` | a `cli.counter` data point: counter name, optional label, command name (see [Product counters](#product-counters-are-accepted-at-the-anonymous-tier)) |
+| `RecordDuration` | a `cli.measure` histogram point: measure name, optional label, command name (see [Product durations](#product-durations-are-accepted-at-the-anonymous-tier)) |
 
 ### TierBasic
 
@@ -211,6 +212,33 @@ not match the pattern, or is longer than 64 bytes, is dropped along with its
 counter rather than scrubbed or truncated; a non-positive increment is
 ignored. Increments are summed in memory and sent as one data point per name
 and label when the client flushes, not one record per call.
+
+## Product durations are accepted at the anonymous tier
+
+> **Warning.** `RecordDuration` is accepted at **every** tier, including
+> `TierAnonymous`, exactly like `RecordCounter`: it is sent from CI and
+> whenever the user has made no consent choice. Only `DO_NOT_TRACK`,
+> `WithDisabled` or a disabled client stop it. Its name and label are strings
+> your code chooses and the SDK sends as-is, so they must be **fixed
+> identifiers chosen in code** (`"john.run"`, `"hmac-sha256"`), **never user
+> input, file paths, host names, URLs, tokens, or anything derived from
+> them.**
+
+What is sent, per distinct measure name, label and command:
+
+| Attribute | Tier | Notes |
+|---|---|---|
+| `cli.measure.name` | Anonymous | required; `^[a-z0-9][a-z0-9._-]*$`, at most 64 bytes |
+| `cli.measure.label` | Anonymous | optional, via `WithMeasureLabel`; same rules |
+| `cli.command.name` | Anonymous | the command last passed to `RecordCommandInvocation`, when there was one |
+| the value | Anonymous | a histogram of durations, unit `ms`, with fixed bucket boundaries (1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 60000, 300000) |
+| `cli.version`, `cli.os`, `cli.arch`, `cli.is_ci` | Anonymous | the resource attributes every signal carries |
+
+No session or install ID is attached, at any tier. A name or label that does
+not match the pattern, or is longer than 64 bytes, is dropped along with its
+measure rather than scrubbed or truncated; a non-positive duration is
+ignored. Durations are aggregated in memory and sent as one data point per
+name and label when the client flushes, not one record per call.
 
 ## What's never captured, at any tier
 

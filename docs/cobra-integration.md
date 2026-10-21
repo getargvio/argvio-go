@@ -94,6 +94,19 @@ Still manual:
   proxy. If your CLI uses meaningful custom exit codes, use
   `WithoutRunCapture()` and call `client.RecordExitCode` yourself after
   `Execute()` returns, with the real code.
+- Vendor-defined counters and durations — `client.RecordCounter` and
+  `client.RecordDuration` are not called by `InstrumentCobra`. Call them from
+  your `RunE` (or wherever the work happens) with fixed identifiers; they
+  pick up the current command name automatically. For example:
+
+  ```go
+  start := time.Now()
+  err := runExternalTool(ctx)
+  client.RecordDuration(ctx, "external-tool.run", time.Since(start), argvio.WithMeasureLabel("hmac-sha256"))
+  ```
+
+  Never pass user input as the name or label; see
+  [consent.md](consent.md#product-durations-are-accepted-at-the-anonymous-tier).
 - Raw error detail (`Client.OptIn()`) — never automatic at any tier, by
   design (see [consent.md](consent.md)). If you want opt-in-tier users
   to get detailed error capture, call it yourself, typically from

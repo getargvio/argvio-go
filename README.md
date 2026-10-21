@@ -96,7 +96,7 @@ and is shaped by the tier the current session resolved to:
 
 | Tier | Adds |
 |---|---|
-| `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters (`RecordCounter`, see below) |
+| `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters and durations (`RecordCounter`, `RecordDuration`, see below) |
 | `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead |
 | `Full` | reserved: nothing beyond `Basic` in this SDK |
 | `Opt-in+` | raw error messages and stack traces, via `Client.OptIn()` only |
@@ -139,6 +139,28 @@ label that is not `^[a-z0-9][a-z0-9._-]*$` or is over 64 bytes, is dropped
 > them.** What is sent: the name, the label, the command name, and the usual
 > CLI version, OS, architecture and CI flag; no session or install ID. See
 > [docs/consent.md](docs/consent.md#product-counters-are-accepted-at-the-anonymous-tier).
+
+## Product durations
+
+```go
+start := time.Now()
+runExternalTool()
+client.RecordDuration(ctx, "john.run", time.Since(start), argvio.WithMeasureLabel("hmac-sha256"))
+```
+
+Times something specific to your product, with an optional label. Calls
+are aggregated in memory into a histogram (milliseconds) and sent as one data
+point per name and label when the client flushes, so a hot loop is cheap. A
+non-positive duration, or a name or label that is not
+`^[a-z0-9][a-z0-9._-]*$` or is over 64 bytes, is dropped (not scrubbed).
+
+> **Warning: durations are accepted at the anonymous tier.** Same rules as
+> counters: the name and label go out as-is, so they must be fixed identifiers
+> chosen in code, **never user input, file paths, host names, URLs, tokens or
+> anything derived from them.** What is sent: the name, the label, the command
+> name, and the usual CLI version, OS, architecture and CI flag; no session or
+> install ID. See
+> [docs/consent.md](docs/consent.md#product-durations-are-accepted-at-the-anonymous-tier).
 
 ## Pointing at a collector
 

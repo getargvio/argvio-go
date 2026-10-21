@@ -49,6 +49,11 @@ const (
 	AttrCounterName  = "cli.counter.name"
 	AttrCounterLabel = "cli.counter.label"
 
+	// Vendor-defined durations on the cli.measure metric, accepted at every
+	// tier including TierAnonymous. See RecordDuration.
+	AttrMeasureName  = "cli.measure.name"
+	AttrMeasureLabel = "cli.measure.label"
+
 	// Process-wide resource usage on the command span, omitted where the
 	// platform can't measure it. See RecordCommand.
 	AttrPeakRSSBytes = "cli.process.peak_rss_bytes" // TierBasic+, bytes
@@ -82,6 +87,7 @@ const (
 	MetricCommandDuration    = "cli.command.duration" // milliseconds
 	MetricErrors             = "cli.errors"
 	MetricCounter            = "cli.counter"
+	MetricMeasure            = "cli.measure" // milliseconds
 )
 
 // maxCommandNameLength is the server's max_length for cli.command.name.
@@ -91,7 +97,7 @@ const maxCommandNameLength = 128
 const maxFeatureLength = 64
 
 // maxIdentifierLength is the server's max_length for cli.error.reason,
-// cli.counter.name and cli.counter.label.
+// cli.counter.name, cli.counter.label, cli.measure.name and cli.measure.label.
 const maxIdentifierLength = 64
 
 // validIdentifier reports whether s matches the server's pattern for
