@@ -31,6 +31,7 @@ import (
 // sync.
 const (
 	AttrCommandName   = "cli.command.name"
+	AttrSuggestion    = "cli.command.suggestion" // TierBasic+, a known command name
 	AttrExitCode      = "cli.command.exit_code"
 	AttrDurationMs    = "cli.command.duration_ms"
 	AttrFlagNames     = "cli.flag.names" // TierBasic+
@@ -87,6 +88,7 @@ const (
 	EventHelpViewed       = "cli.help.viewed"
 	EventErrorRaised      = "cli.error.raised"
 	EventFeatureActivated = "cli.feature.activated"
+	EventCommandUnknown   = "cli.command.unknown"
 )
 
 // SpanCommandPrefix prefixes the name of the span RecordCommand emits
@@ -512,6 +514,71 @@ func (c *Client) RecordFeatureActivated(ctx context.Context, feature string) {
 	c.dispatch(func() {
 		c.emitEventNow(ctx, EventFeatureActivated, otellog.SeverityInfo1, append(attrs, c.identityAttrs(sessionID)...)...)
 	})
+}
+
+// SetKnownCommands registers the CLI's own command set: the command paths
+// (as for RecordCommandInvocation, e.g. "mycli deploy push" or "deploy.push")
+// that RecordUnknownCommand may report as a suggestion. It replaces any set
+// given before. cobrasdk calls it for you when it records an unknown command;
+// call it yourself only when you record them by hand. Safe to call on a nil
+// or disabled Client.
+func (c *Client) SetKnownCommands(commandPaths ...string) {
+	defer recoverGuard(nil)
+	if !c.enabled() {
+		return
+	}
+	known := make(map[string]struct{}, len(commandPaths))
+	for _, p := range commandPaths {
+		if strings.TrimSpace(p) != "" {
+			known[c.commandName(p)] = struct{}{}
+		}
+	}
+	c.knownCommands.Store(&known)
+}
+
+// knownCommand returns the registered command name that path refers to, or
+// "" if there is none. What it returns is the registered string itself, never
+// the caller's, so nothing the caller passed in can reach the wire.
+func (c *Client) knownCommand(path string) string {
+	known := c.knownCommands.Load()
+	if known == nil || path == "" || len(path) > 4*maxCommandNameLength {
+		return ""
+	}
+	name := c.commandName(path)
+	if _, ok := (*known)[name]; ok {
+		return name
+	}
+	return ""
+}
+
+// RecordUnknownCommand records one attempt to run a command that does not
+// exist, so vendors can see how often users mistype commands and which ones
+// they were reaching for. It emits cli.command.unknown, which carries no
+// command name, flags, session or install ID and an empty body.
+//
+// The typed text is deliberately not a parameter: a mistyped command is
+// arbitrary user input and may be a secret, a path or a sentence, so this SDK
+// accepts none of it, nor anything derived from it (a prefix, a hash, a
+// length). suggestion is the nearest command the CLI itself knows, chosen by
+// the CLI from its own command table; pass "" when no command is close enough.
+// It is sent only if it names a command registered with SetKnownCommands and
+// at TierBasic+; anything else is dropped and the attempt is still recorded
+// without it.
+//
+// At TierAnonymous the event is a bare count of attempts. Safe to call on a
+// nil or disabled Client.
+func (c *Client) RecordUnknownCommand(ctx context.Context, suggestion string) {
+	defer recoverGuard(nil)
+	if !c.gate(TierAnonymous) {
+		return
+	}
+	var attrs []attribute.KeyValue
+	if c.tier.Allows(TierBasic) {
+		if name := c.knownCommand(suggestion); name != "" {
+			attrs = append(attrs, attribute.String(AttrSuggestion, name))
+		}
+	}
+	c.emitEvent(ctx, EventCommandUnknown, otellog.SeverityInfo1, attrs...)
 }
 
 // RecordHelpFlagUsage records that a command's help output was

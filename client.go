@@ -62,6 +62,7 @@ type Client struct {
 
 	currentCommand atomic.Pointer[string]
 	activated      sync.Map
+	knownCommands  atomic.Pointer[map[string]struct{}]
 
 	exportTimeout   time.Duration
 	shutdownTimeout time.Duration
