@@ -63,6 +63,14 @@ const (
 	// can't be measured. See RecordSessionStart.
 	AttrBinarySizeBytes = "cli.binary.size_bytes"   // TierBasic+, bytes
 	AttrStartupMs       = "cli.startup.duration_ms" // TierBasic+, milliseconds
+
+	// The environment the CLI runs in, on the session start event, omitted
+	// where it can't be detected. See RecordSessionStart.
+	AttrShell          = "cli.shell"           // TierBasic+, fixed vocabulary
+	AttrTerminal       = "cli.terminal"        // TierBasic+, fixed vocabulary
+	AttrStdoutIsTTY    = "cli.stdout.is_tty"   // TierBasic+, bool
+	AttrRuntimeName    = "cli.runtime.name"    // TierBasic+, always "go"
+	AttrRuntimeVersion = "cli.runtime.version" // TierBasic+, e.g. "1.22.1"
 )
 
 // Log event names.
@@ -286,6 +294,17 @@ func (c *Client) identityAttrs(sessionID string) []attribute.KeyValue {
 // is read with one stat, off the caller's goroutine. A value that can't be
 // measured is omitted rather than sent as zero; a startup of 0 ms is a real
 // measurement and is sent.
+//
+// Also at TierBasic+ it carries the environment: the shell (AttrShell),
+// the terminal emulator (AttrTerminal), whether stdout is a terminal or
+// piped (AttrStdoutIsTTY) and the Go runtime (AttrRuntimeName, always "go",
+// and AttrRuntimeVersion, with build suffixes stripped). Shell and
+// terminal are each one of a small fixed vocabulary (see the Shell* and
+// Terminal* constants), "other" for anything unrecognised and, for the
+// terminal, "unknown" when nothing identifies it; no path or raw
+// environment value is ever sent. Detection reads environment variables
+// and stats stdout, off the caller's goroutine, and an attribute that
+// can't be detected is omitted.
 func (c *Client) RecordSessionStart(ctx context.Context) {
 	defer recoverGuard(nil)
 	if !c.enabled() || !c.sessionOn.CompareAndSwap(false, true) {
@@ -311,6 +330,7 @@ func (c *Client) RecordSessionStart(ctx context.Context) {
 			if startupMs >= 0 {
 				attrs = append(attrs, attribute.Int64(AttrStartupMs, startupMs))
 			}
+			attrs = append(attrs, readSessionEnvironment()...)
 		}
 		c.emitEventNow(ctx, EventSessionStarted, otellog.SeverityInfo1, attrs...)
 	})

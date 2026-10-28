@@ -36,7 +36,7 @@ numbers even from users who've never made a choice.
 
 | Function | What's emitted at Anonymous |
 |---|---|
-| `RecordSessionStart`/`End` | `cli.sessions` counter increment only; no binary size or startup time |
+| `RecordSessionStart`/`End` | `cli.sessions` counter increment only; no binary size, startup time or environment |
 | `RecordCommandInvocation` | `cli.invocations` counter increment only |
 | `RecordExitCode` | exit code, no command path |
 | `RecordLatency` | duration, no command path |
@@ -80,6 +80,12 @@ Also adds:
   event. Nothing is measured for these at `TierAnonymous`. See
   [Binary size and startup overhead](#binary-size-and-startup-overhead)
   below.
+- `RecordSessionStart` also adds the environment the CLI runs in to the
+  `cli.session.started` event: shell (`cli.shell`), terminal emulator
+  (`cli.terminal`), whether stdout is a terminal (`cli.stdout.is_tty`) and
+  the Go runtime (`cli.runtime.name`, `cli.runtime.version`). Nothing is
+  detected at `TierAnonymous`. See
+  [Shell, terminal and runtime](#shell-terminal-and-runtime) below.
 - `RecordError` starts emitting a `cli.error.raised` event: category
   (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
   a message or stack trace — see TierOptIn.
@@ -169,6 +175,47 @@ the same CLI rather than against other CLIs. `cobrasdk` calls
 the figure is meant to measure; if you call it yourself, do so at the same
 place in every release. A startup of 0 ms is a real measurement and is
 sent; a value that can't be measured is omitted, never sent as zero.
+
+## Shell, terminal and runtime
+
+At `TierBasic` and above, `RecordSessionStart` attaches a few facts about
+the environment to the `cli.session.started` event, so vendors can see
+which shells and terminals their users run in, whether output is piped
+or interactive, and which Go version the CLI is built with:
+
+| Attribute | Type | Meaning |
+|---|---|---|
+| `cli.shell` | string | The user's shell: `bash`, `zsh`, `fish`, `sh`, `dash`, `ksh`, `tcsh`, `csh`, `nushell`, `elvish`, `xonsh`, `powershell`, `cmd`, or `other` |
+| `cli.terminal` | string | The terminal emulator: `apple_terminal`, `iterm2`, `vscode`, `windows_terminal`, `wezterm`, `kitty`, `alacritty`, `ghostty`, `hyper`, `warp`, `konsole`, `vte`, `jetbrains`, `tmux`, `screen`, `other`, or `unknown` |
+| `cli.stdout.is_tty` | bool | Whether stdout is a terminal (`true`) or piped or redirected (`false`) |
+| `cli.runtime.name` | string | Always `go` |
+| `cli.runtime.version` | string | The Go release, for example `1.22.1`, with any build suffix removed |
+
+Sent once per process, on session start only.
+
+These values are the privacy control, so none of them is ever an
+environment value passed through. The shell comes from the name of
+`$SHELL` (the path is dropped), the terminal from which well-known
+variables are set (`TERM_PROGRAM`, `WT_SESSION`, `KITTY_WINDOW_ID`,
+`ALACRITTY_*`, `VTE_VERSION`, `TMUX` and so on), and each is looked up in
+a fixed table. A shell or `TERM_PROGRAM` that isn't in the table is
+`other`; a terminal with no marker at all is `unknown`. `TERM` and every
+other variable are never read. A spoofed or garbage value can therefore
+only ever land in `other`. The tables live in `environment.go`.
+
+On Windows, where `$SHELL` is normally unset, the shell is a best-effort
+guess: PowerShell if `PSModulePath` has the per-user PowerShell modules
+entry PowerShell adds to it, else `cmd` if `ComSpec` is set. A `cmd.exe`
+started from PowerShell inherits that variable and reads as PowerShell.
+Under a multiplexer, the terminal underneath is reported when a marker
+names it; `tmux` or `screen` only when nothing else does.
+
+Detection is local and read-only: environment variables and one `stat` of
+stdout, with no subprocess, done once off the caller's goroutine. `/dev/null`
+counts as not a terminal. Whatever can't be detected is omitted, never sent
+as a guess: no shell when `$SHELL` is unset on Unix, no TTY flag when
+stdout can't be stat'ed, no runtime version for a toolchain built from
+source.
 
 ## Error reasons
 

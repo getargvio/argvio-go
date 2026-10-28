@@ -97,7 +97,7 @@ and is shaped by the tier the current session resolved to:
 | Tier | Adds |
 |---|---|
 | `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters and durations (`RecordCounter`, `RecordDuration`, see below) |
-| `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead |
+| `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead, shell, terminal, stdout TTY and Go runtime version |
 | `Full` | reserved: nothing beyond `Basic` in this SDK |
 | `Opt-in+` | raw error messages and stack traces, via `Client.OptIn()` only |
 
