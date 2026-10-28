@@ -97,7 +97,7 @@ and is shaped by the tier the current session resolved to:
 | Tier | Adds |
 |---|---|
 | `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters and durations (`RecordCounter`, `RecordDuration`, see below) |
-| `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead, shell, terminal, stdout TTY and Go runtime version |
+| `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead, shell, terminal, stdout TTY and Go runtime version, config customization count and auth state, when you report them |
 | `Full` | reserved: nothing beyond `Basic` in this SDK |
 | `Opt-in+` | raw error messages and stack traces, via `Client.OptIn()` only |
 
@@ -109,6 +109,33 @@ at `TierOptIn`). Server-side allowlist stripping is a backstop, not the
 primary mechanism. See [docs/consent.md](docs/consent.md) for the full
 model, how `ConsentProvider` resolves the tier, and how to write your
 own.
+
+## Config customization and auth state
+
+Two session facts only your CLI knows. Both are optional, and sent on the
+session start event at `Basic` and above:
+
+```go
+client, err := argvio.New(apiKey, "mycli", version,
+	// How many config keys differ from their defaults (a count, never names).
+	argvio.WithConfigCustomizedCountFunc(func() int { return cfg.CountNonDefault() }),
+	// authenticated, anonymous or unknown.
+	argvio.WithAuthStateFunc(func() argvio.AuthState {
+		if token == "" {
+			return argvio.AuthStateAnonymous
+		}
+		return argvio.AuthStateAuthenticated
+	}),
+)
+```
+
+`WithConfigCustomizedCount(n)` and `WithAuthState(state)` take a fixed value
+instead. The `Func` forms run once, at session start and only at `Basic` and
+above; a callback that panics just leaves its attribute out. The count is
+clamped to 0-1000 and an `AuthState` outside the three constants is dropped.
+Only the number and the enum can be passed: never key names or values, and
+never a user name, account ID or token. See
+[docs/consent.md](docs/consent.md#config-customization-and-auth-state).
 
 ## Error reasons
 

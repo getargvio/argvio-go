@@ -71,6 +71,12 @@ const (
 	AttrStdoutIsTTY    = "cli.stdout.is_tty"   // TierBasic+, bool
 	AttrRuntimeName    = "cli.runtime.name"    // TierBasic+, always "go"
 	AttrRuntimeVersion = "cli.runtime.version" // TierBasic+, e.g. "1.22.1"
+
+	// Facts only the vendor's CLI knows, on the session start event, omitted
+	// unless the vendor configures them. See WithConfigCustomizedCount and
+	// WithAuthState.
+	AttrConfigCustomizedCount = "cli.config.customized_count" // TierBasic+, int
+	AttrAuthState             = "cli.auth.state"              // TierBasic+, AuthState
 )
 
 // Log event names.
@@ -305,6 +311,14 @@ func (c *Client) identityAttrs(sessionID string) []attribute.KeyValue {
 // environment value is ever sent. Detection reads environment variables
 // and stats stdout, off the caller's goroutine, and an attribute that
 // can't be detected is omitted.
+//
+// Also at TierBasic+ it carries two facts the vendor reports itself: how many
+// configuration keys differ from their defaults (AttrConfigCustomizedCount,
+// from WithConfigCustomizedCount, a bare count clamped to 0-1000) and whether
+// the user is signed in (AttrAuthState, from WithAuthState, one of the
+// AuthState constants). Either is omitted unless configured. The *Func forms
+// are evaluated here, on the caller's goroutine, only at TierBasic+; a
+// callback that panics just leaves its attribute out.
 func (c *Client) RecordSessionStart(ctx context.Context) {
 	defer recoverGuard(nil)
 	if !c.enabled() || !c.sessionOn.CompareAndSwap(false, true) {
@@ -313,10 +327,14 @@ func (c *Client) RecordSessionStart(ctx context.Context) {
 	sessionID := c.ensureSessionID()
 	basic := c.tier.Allows(TierBasic)
 	var startupMs int64
+	var vendorAttrs []attribute.KeyValue
 	if basic {
 		// Read here, not in the job, so queueing behind other work doesn't
 		// count as startup.
 		startupMs = readStartupMs()
+		// Also here: the vendor's callbacks may read state (config, credentials)
+		// that is only safe to touch from the caller's goroutine.
+		vendorAttrs = c.vendorSessionAttrs()
 	}
 	c.dispatch(func() {
 		attrs := c.identityAttrs(sessionID)
@@ -331,6 +349,7 @@ func (c *Client) RecordSessionStart(ctx context.Context) {
 				attrs = append(attrs, attribute.Int64(AttrStartupMs, startupMs))
 			}
 			attrs = append(attrs, readSessionEnvironment()...)
+			attrs = append(attrs, vendorAttrs...)
 		}
 		c.emitEventNow(ctx, EventSessionStarted, otellog.SeverityInfo1, attrs...)
 	})

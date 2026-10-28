@@ -39,6 +39,8 @@ type Client struct {
 	cliName       string
 	installIDPath string
 	installMethod string
+	configCount   func() int
+	authState     func() AuthState
 
 	installOnce sync.Once
 	installID   string
@@ -177,6 +179,8 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		cliName:         cfg.cliName,
 		installIDPath:   resolveInstallIDPath(cfg),
 		installMethod:   cfg.installMethod,
+		configCount:     cfg.configCount,
+		authState:       cfg.authState,
 		latencyHist:     latencyHist,
 		invocations:     invocations,
 		errorEvents:     errorEvents,

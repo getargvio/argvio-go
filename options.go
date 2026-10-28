@@ -38,6 +38,9 @@ type config struct {
 	ci            CIInfo
 	installIDPath string
 	installMethod string
+
+	configCount func() int
+	authState   func() AuthState
 }
 
 type keyValue struct {

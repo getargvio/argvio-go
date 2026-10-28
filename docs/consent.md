@@ -36,7 +36,7 @@ numbers even from users who've never made a choice.
 
 | Function | What's emitted at Anonymous |
 |---|---|
-| `RecordSessionStart`/`End` | `cli.sessions` counter increment only; no binary size, startup time or environment |
+| `RecordSessionStart`/`End` | `cli.sessions` counter increment only; no binary size, startup time, environment, config count or auth state |
 | `RecordCommandInvocation` | `cli.invocations` counter increment only |
 | `RecordExitCode` | exit code, no command path |
 | `RecordLatency` | duration, no command path |
@@ -86,6 +86,12 @@ Also adds:
   the Go runtime (`cli.runtime.name`, `cli.runtime.version`). Nothing is
   detected at `TierAnonymous`. See
   [Shell, terminal and runtime](#shell-terminal-and-runtime) below.
+- `RecordSessionStart` also adds, when the vendor configures them, how many
+  configuration keys differ from their defaults (`cli.config.customized_count`)
+  and whether the user is signed in (`cli.auth.state`). Nothing is read or
+  sent at `TierAnonymous`. See
+  [Config customization and auth state](#config-customization-and-auth-state)
+  below.
 - `RecordError` starts emitting a `cli.error.raised` event: category
   (`ErrorCategory`, e.g. `ErrorCategoryNetwork`) plus command path. Never
   a message or stack trace — see TierOptIn.
@@ -216,6 +222,32 @@ counts as not a terminal. Whatever can't be detected is omitted, never sent
 as a guess: no shell when `$SHELL` is unset on Unix, no TTY flag when
 stdout can't be stat'ed, no runtime version for a toolchain built from
 source.
+
+## Config customization and auth state
+
+At `TierBasic` and above, `RecordSessionStart` attaches two facts that only
+your CLI knows, if you configure them, so you can see how far users depart
+from the defaults and how many are signed in:
+
+| Attribute | Type | Set with | Meaning |
+|---|---|---|---|
+| `cli.config.customized_count` | int | `WithConfigCustomizedCount(n)` or `WithConfigCustomizedCountFunc(fn)` | How many configuration keys differ from their defaults, clamped to 0-1000 |
+| `cli.auth.state` | string | `WithAuthState(s)` or `WithAuthStateFunc(fn)` | `authenticated`, `anonymous` or `unknown` (the `AuthState` constants) |
+
+Both are omitted unless you set them, and nothing is sent at `TierAnonymous`.
+The `Func` forms run once, when `RecordSessionStart` is called, and only at
+`TierBasic` and above, so a user who hasn't consented never has their
+configuration or credentials read on telemetry's behalf. They run on the
+caller's goroutine, so keep them fast. A callback that panics, or returns an
+`AuthState` outside the three constants, just leaves its attribute out; it
+never reaches the host CLI.
+
+**What you must not pass.** The API only accepts an `int` and an `AuthState`,
+so key names, values, paths, user names, account IDs and tokens cannot be
+sent through it. Compute the count yourself, from the keys that differ from
+their defaults; don't derive it from anything secret. Report
+`AuthStateUnknown` rather than guessing when you can't tell.
+
 
 ## Error reasons
 
