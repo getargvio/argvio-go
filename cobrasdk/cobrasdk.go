@@ -19,6 +19,24 @@
 // capture is implemented via Command.SetHelpFunc, the dedicated,
 // chainable extension point Cobra provides for exactly this case.
 //
+// # Unknown commands
+//
+// A mistyped command never reaches RunE or PersistentPreRunE, so neither
+// hook sees it. Cobra reports it in one of two ways, and each needs its own
+// observer: on a root command with subcommands, Find fails and ExecuteC
+// returns an error ("unknown command "x" for "mycli"") before any hook runs,
+// which is observed by Execute or RecordExecuteError; on a non-root parent
+// that has subcommands but no Run, cobra silently prints its help instead,
+// which is observed from the help func InstrumentCobra installs. Neither
+// changes what cobra does: the host CLI keeps its error, output and exit
+// code. Installing an Args validator instead would not work (cobra skips
+// Args on a command that is not runnable, and Args on the root replaces its
+// built-in unknown-command check), so it is not used.
+//
+// What the user typed is only ever read in memory to find the nearest
+// registered command, by edit distance; it is never sent, logged or stored,
+// and only that command's own name is reported.
+//
 // See docs/cobra-integration.md in the module root for a worked
 // example and the manual-wiring pattern for vendors who want to call
 // the underlying pieces themselves instead of using Instrument or
@@ -28,6 +46,8 @@ package cobrasdk
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,8 +105,9 @@ type hookConfig struct {
 	reason   func(error) string
 	both     func(error) (argvio.ErrorCategory, string)
 
-	captureHelp bool
-	captureRunE bool
+	captureHelp    bool
+	captureRunE    bool
+	captureUnknown bool
 }
 
 // classify returns the category and reason for err, calling the vendor's
@@ -173,6 +194,14 @@ func WithoutRunCapture() HookOption {
 	return func(c *hookConfig) { c.captureRunE = false }
 }
 
+// WithoutUnknownCommandCapture disables the recording of unknown-command
+// attempts that InstrumentCobra otherwise does from the help func, for
+// parents that have subcommands but no Run of their own. It does not affect
+// Execute or RecordExecuteError, which you call explicitly.
+func WithoutUnknownCommandCapture() HookOption {
+	return func(c *hookConfig) { c.captureUnknown = false }
+}
+
 // InstrumentCobra wires automatic telemetry capture into root and its
 // entire subcommand tree:
 //
@@ -184,6 +213,10 @@ func WithoutRunCapture() HookOption {
 //     called — subcommands added to the tree afterward are not wrapped.
 //   - Help usage (see RecordHelpFlagUsage) is captured via
 //     Command.SetHelpFunc.
+//   - A mistyped subcommand of a parent that has no Run of its own (see
+//     RecordUnknownCommand) is captured from the same help func, since cobra
+//     shows that parent's help rather than failing. A mistyped command on the
+//     root is only seen through Execute or RecordExecuteError.
 //
 // InstrumentCobra composes with hooks the vendor has already installed:
 // if root already has a PersistentPreRunE, ours runs first (so
@@ -199,7 +232,7 @@ func InstrumentCobra(root *cobra.Command, client *argvio.Client, opts ...HookOpt
 	if root == nil {
 		return
 	}
-	cfg := &hookConfig{captureHelp: true, captureRunE: true}
+	cfg := &hookConfig{captureHelp: true, captureRunE: true, captureUnknown: true}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)
@@ -209,8 +242,8 @@ func InstrumentCobra(root *cobra.Command, client *argvio.Client, opts ...HookOpt
 	classifiers.Store(root, cfg)
 
 	installPreRun(root, client)
-	if cfg.captureHelp {
-		installHelpCapture(root, client)
+	if cfg.captureHelp || cfg.captureUnknown {
+		installHelpCapture(root, client, cfg)
 	}
 	if cfg.captureRunE {
 		wrapRunTree(root, client, cfg)
@@ -243,15 +276,179 @@ func installPreRun(root *cobra.Command, client *argvio.Client) {
 	root.PersistentPreRun = nil
 }
 
-func installHelpCapture(root *cobra.Command, client *argvio.Client) {
+func installHelpCapture(root *cobra.Command, client *argvio.Client, cfg *hookConfig) {
 	existing := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
 		client.RecordSessionStart(cmd.Context())
-		client.RecordHelpFlagUsage(cmd.Context(), cmd.CommandPath())
+		// Cobra shows help in place of an error for a mistyped subcommand of
+		// a parent with no Run; that is an unknown command, not a help view.
+		if typed, ok := mistypedSubcommand(cmd); ok && cfg.captureUnknown {
+			recordUnknown(cmd, client, typed)
+		} else if cfg.captureHelp {
+			client.RecordHelpFlagUsage(cmd.Context(), cmd.CommandPath())
+		}
 		if existing != nil {
 			existing(cmd, args)
 		}
 	})
+}
+
+// mistypedSubcommand reports whether cmd's help is being shown because the
+// user typed something that is not one of its subcommands, and returns what
+// they typed. That is the case for a parent that has subcommands but is not
+// runnable, was given a positional argument and was not asked for help: cobra
+// falls back to its help without an error.
+func mistypedSubcommand(cmd *cobra.Command) (typed string, ok bool) {
+	if cmd.Runnable() || !cmd.HasSubCommands() {
+		return "", false
+	}
+	help := cmd.Flags().Lookup("help")
+	if help == nil || help.Changed || !cmd.Flags().Parsed() || cmd.Flags().NArg() == 0 {
+		return "", false
+	}
+	return cmd.Flags().Arg(0), true
+}
+
+// unknownCommandPrefix starts the error cobra returns for an unknown
+// subcommand: `unknown command "x" for "mycli"`.
+const unknownCommandPrefix = "unknown command "
+
+// Execute runs root like root.Execute and records an unknown-command attempt
+// if that is how it failed (see RecordExecuteError). It returns exactly the
+// error root.Execute would, so the host CLI's error output and exit code are
+// unchanged.
+//
+//	if err := cobrasdk.Execute(rootCmd, client); err != nil {
+//	    os.Exit(1)
+//	}
+//
+// Safe to call with a nil client.
+func Execute(root *cobra.Command, client *argvio.Client) error {
+	if root == nil {
+		return nil
+	}
+	cmd, err := root.ExecuteC()
+	RecordExecuteError(cmd, client, err)
+	return err
+}
+
+// RecordExecuteError records an unknown-command attempt if err, as returned by
+// ExecuteC or Execute, is cobra's unknown-command error; cmd is the command
+// ExecuteC returned alongside it. Use it instead of Execute when you call
+// ExecuteC yourself. It does nothing for any other error, so it is safe to
+// call on every one.
+//
+// Only a command with subcommands counts: the same message from an Args
+// validator such as cobra.NoArgs on a leaf is a misused command, not an
+// unknown one. The text of err is read once, in memory, to find the nearest
+// registered command; it is not sent, logged or stored.
+func RecordExecuteError(cmd *cobra.Command, client *argvio.Client, err error) {
+	if cmd == nil || err == nil || !cmd.HasSubCommands() {
+		return
+	}
+	msg := err.Error()
+	if !strings.HasPrefix(msg, unknownCommandPrefix) {
+		return
+	}
+	// If the message ever stops looking like this the attempt is still
+	// counted, just without a suggestion.
+	var typed string
+	if quoted, qerr := strconv.QuotedPrefix(msg[len(unknownCommandPrefix):]); qerr == nil {
+		typed, _ = strconv.Unquote(quoted)
+	}
+	recordUnknown(cmd, client, typed)
+}
+
+// recordUnknown records an unknown-command attempt on parent, with the nearest
+// of parent's subcommands to typed as the suggestion when one is close enough.
+// typed is used here and nowhere else: it never leaves this function.
+func recordUnknown(parent *cobra.Command, client *argvio.Client, typed string) {
+	ctx := parent.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var suggestion string
+	if near := nearestCommand(parent, typed); near != nil {
+		suggestion = near.CommandPath()
+	}
+	// Registered on every attempt rather than once up front, so commands
+	// added after InstrumentCobra are known too. The attempt is rare.
+	client.SetKnownCommands(commandPaths(parent.Root())...)
+	client.RecordSessionStart(ctx)
+	client.RecordUnknownCommand(ctx, suggestion)
+}
+
+// commandPaths returns the command path of every command under cmd.
+func commandPaths(cmd *cobra.Command) []string {
+	paths := []string{cmd.CommandPath()}
+	for _, sub := range cmd.Commands() {
+		paths = append(paths, commandPaths(sub)...)
+	}
+	return paths
+}
+
+// maxTypedLength bounds what is compared: no command name is longer than the
+// server's limit, so anything longer is not a typo of one.
+const maxTypedLength = 128
+
+// defaultSuggestionDistance is cobra's own default for
+// SuggestionsMinimumDistance.
+const defaultSuggestionDistance = 2
+
+// nearestCommand returns the subcommand of parent whose name is within edit
+// distance of typed (cobra's SuggestionsMinimumDistance, 2 by default), the
+// closest one if several are, or nil. Only edit distance counts, case
+// ignored, plus the SuggestFor names the vendor declared: a command whose
+// name merely starts with, or contains, the typed text is not a suggestion.
+// Honours DisableSuggestions.
+func nearestCommand(parent *cobra.Command, typed string) *cobra.Command {
+	if parent.DisableSuggestions || typed == "" || len(typed) > maxTypedLength {
+		return nil
+	}
+	limit := parent.SuggestionsMinimumDistance
+	if limit <= 0 {
+		limit = defaultSuggestionDistance
+	}
+	typed = strings.ToLower(typed)
+	var best *cobra.Command
+	bestDist := limit + 1
+	for _, sub := range parent.Commands() {
+		if !sub.IsAvailableCommand() {
+			continue
+		}
+		dist := editDistance(typed, strings.ToLower(sub.Name()))
+		for _, alt := range sub.SuggestFor {
+			if strings.EqualFold(typed, alt) {
+				dist = 0
+			}
+		}
+		if dist < bestDist {
+			best, bestDist = sub, dist
+		}
+	}
+	return best
+}
+
+// editDistance is the Levenshtein distance between a and b, in runes.
+func editDistance(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur := make([]int, len(rb)+1)
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(rb)]
 }
 
 func wrapRunTree(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig) {

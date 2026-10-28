@@ -82,6 +82,7 @@ Automatic:
 - `RecordError` — fires when `RunE` returns a non-nil error, classified
   via `WithErrorClassifier` (default: `ErrorCategoryUnknown`).
 - `RecordHelpFlagUsage` — on any help invocation.
+- `RecordUnknownCommand` — a mistyped subcommand of a parent with no `Run`; for the root, call `cobrasdk.Execute` (see [Unknown commands](#unknown-commands)).
 
 Still manual:
 - `RecordSessionStart`/`RecordSessionEnd` — a "session" here is your
@@ -170,6 +171,48 @@ cobrasdk.InstrumentCobra(rootCmd, client,
 - **`WithoutRunCapture()`** — skip the recursive `RunE` wrapping, if you
   want to call `RecordExitCode`/`RecordLatency`/`RecordError` yourself
   (e.g. to record the real OS exit code — see above).
+
+## Unknown commands
+
+A mistyped command never reaches `RunE` or `PersistentPreRunE`, so the capture
+above cannot see it. Cobra reports it in one of two ways, and each needs its
+own observer:
+
+- **On the root command**, cobra's `Find` fails and `ExecuteC` returns
+  `unknown command "x" for "mycli"` before any hook runs. Call
+  `cobrasdk.Execute(rootCmd, client)` in `main()` instead of `rootCmd.Execute()`,
+  or, if you call `ExecuteC` yourself, pass what it returns to
+  `cobrasdk.RecordExecuteError(cmd, client, err)`. Both return the error
+  unchanged.
+- **On a parent that has subcommands but no `Run`**, cobra does not fail: it
+  prints that parent's help and exits 0. `InstrumentCobra` sees this from the
+  help func it installs (a parent that is not runnable, given a positional
+  argument and not asked for help) and records it as an unknown command instead
+  of a help view. Turn it off with `WithoutUnknownCommandCapture()`.
+
+Both leave the host CLI exactly as it was: same error, same output, same exit
+code.
+
+**Why not an `Args` validator.** It is the obvious hook and it does not work:
+cobra never runs `Args` on a command that is not runnable, and setting `Args` on
+the root replaces cobra's built-in unknown-command check, so the error would
+have to be rebuilt by hand. Observing what cobra already does is the only way
+that keeps behaviour identical.
+
+**Why the error text is read.** `ExecuteC` gives no structured error, so the
+typed word is read from cobra's message, which has been
+`unknown command %q for %q` since long before v1.10. It is used in memory to find
+the nearest subcommand and goes nowhere else. If a future cobra changes the
+message, the attempt is still counted, just without a suggestion; if it changes
+the prefix, nothing is recorded. The help-func path does not parse anything. A
+command that uses `cobra.NoArgs` and has no subcommands produces the same message
+for a different reason (stray arguments), and is deliberately not recorded.
+
+The suggestion is the nearest visible subcommand by edit distance (cobra's
+`SuggestionsMinimumDistance`, 2 by default), or one named in a command's
+`SuggestFor`; `DisableSuggestions` turns suggestions off. See
+[consent.md](consent.md#unknown-commands) for what is sent at each tier. `mycli help
+nosuchtopic` is not recorded.
 
 ## Commands that exit the process themselves
 

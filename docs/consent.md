@@ -43,6 +43,7 @@ numbers even from users who've never made a choice.
 | `RecordHelpFlagUsage` | a bare "help was used" event, no command path |
 | `RecordError` | `cli.errors` counter increment by command; no category, no event |
 | `RecordFeatureActivated` | nothing |
+| `RecordUnknownCommand` | bare `cli.command.unknown` event: an attempt happened, nothing else (see [Unknown commands](#unknown-commands)) |
 | `RecordCounter` | a `cli.counter` data point: counter name, optional label, command name (see [Product counters](#product-counters-are-accepted-at-the-anonymous-tier)) |
 | `RecordDuration` | a `cli.measure` histogram point: measure name, optional label, command name (see [Product durations](#product-durations-are-accepted-at-the-anonymous-tier)) |
 
@@ -318,6 +319,38 @@ not match the pattern, or is longer than 64 bytes, is dropped along with its
 measure rather than scrubbed or truncated; a non-positive duration is
 ignored. Durations are aggregated in memory and sent as one data point per
 name and label when the client flushes, not one record per call.
+
+## Unknown commands
+
+`RecordUnknownCommand` reports one attempt to run a command that does not exist,
+as the `cli.command.unknown` event, so vendors can see how often users mistype
+commands and which ones they were reaching for.
+
+| Tier | What is sent |
+|---|---|
+| `TierAnonymous` | The event alone: a bare attempt, which still counts toward the attempt rate. No attributes beyond the tier and the resource attributes every record carries. |
+| `TierBasic` and above | Also `cli.command.suggestion`: the nearest *known* command, as a dotted name (`deploy.push`), when one is close enough. Omitted otherwise. |
+
+Nothing else is ever attached, at any tier: no command name, flag names,
+session or install ID, error attribute, and the log body is empty (the server
+discards it even at `TierFull` and above).
+
+**What the user typed is never sent, logged or stored, in any tier.** A mistyped
+command is arbitrary input and may be a token, a path or a sentence, so
+`RecordUnknownCommand` has no parameter for it. Its one argument, `suggestion`,
+must come from the CLI's own command table:
+
+- it is sent only if it names a command registered with `SetKnownCommands` (the
+  `cobrasdk` integration registers the whole command tree for you), and what is
+  sent is the registered name, never the caller's string; anything else is
+  dropped and the attempt is still recorded, without it;
+- the nearest command is chosen by edit distance (at most 2 by default, cobra's
+  `SuggestionsMinimumDistance`), never because its name starts with or contains
+  the typed text, and only among commands that are not hidden. Typed text longer
+  than 128 bytes gets no suggestion.
+
+An attempt is not an invocation: it is not counted in `cli.command.invocations`
+and produces no span.
 
 ## What's never captured, at any tier
 
