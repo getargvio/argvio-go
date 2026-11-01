@@ -320,6 +320,30 @@ measure rather than scrubbed or truncated; a non-positive duration is
 ignored. Durations are aggregated in memory and sent as one data point per
 name and label when the client flushes, not one record per call.
 
+## Dimensions are accepted at the anonymous tier
+
+> **Warning.** `Client.Counter` and `Client.Duration` handles send the same
+> `cli.counter` and `cli.measure` metrics as `RecordCounter` and
+> `RecordDuration`, at **every** tier including `TierAnonymous`. Each
+> dimension declared with `Dims` adds one more string your code chooses to
+> every data point, so keys and values must be **fixed identifiers chosen in
+> code** (`"severity"`, `"high"`, `"bola"`), **never user input, file paths,
+> host names, URLs, tokens, or anything derived from them.**
+
+What a handle adds to the attributes listed above, per distinct name,
+dimension values and command:
+
+| Attribute | Tier | Notes |
+|---|---|---|
+| `cli.dim.<key>` | Anonymous | one per key declared with `Dims`, at most `MaxDims` (3); key and value `^[a-z0-9][a-z0-9._-]*$`, at most 64 bytes |
+
+A handle sends no label. A handle with an invalid or repeated key, or more
+than `MaxDims` keys, drops every call; a call with the wrong number of values
+or an invalid value is dropped, never sent without it, so it can't merge into
+another series. The server stores the dimensions as one tuple per data point
+and caps the distinct values per key (`public.max_dim_values_per_key`),
+storing new ones past the cap as `other`.
+
 ## Unknown commands
 
 `RecordUnknownCommand` reports one attempt to run a command that does not exist,
