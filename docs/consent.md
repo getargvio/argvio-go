@@ -320,6 +320,23 @@ measure rather than scrubbed or truncated; a non-positive duration is
 ignored. Durations are aggregated in memory and sent as one data point per
 name and label when the client flushes, not one record per call.
 
+## Product values are accepted at the anonymous tier
+
+> **Warning.** `Client.Value` handles send the `cli.value` histogram at
+> **every** tier, including `TierAnonymous`, like counters. Names, dimension
+> keys and values must be fixed identifiers chosen in code.
+
+| Attribute | Tier | Notes |
+|---|---|---|
+| `cli.value.name` | Anonymous | required; same rules as a counter name |
+| `cli.value.unit` | Anonymous | `1`, `By` or `%`, from `WithUnit` |
+| `cli.dim.<key>` | Anonymous | one per key declared with `Dims` |
+| `cli.command.name` | Anonymous | the command last passed to `RecordCommandInvocation` |
+| the value | Anonymous | a histogram with fixed bounds 0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 5000, 10000, 100000 |
+
+No session ID is attached. A negative or non-finite value, or an invalid
+name, key, value or unit, drops the call.
+
 ## Dimensions are accepted at the anonymous tier
 
 > **Warning.** `Client.Counter` and `Client.Duration` handles send the same

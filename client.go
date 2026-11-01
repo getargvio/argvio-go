@@ -50,6 +50,7 @@ type Client struct {
 	errorEvents metric.Int64Counter
 	counter     metric.Int64Counter
 	measure     metric.Float64Histogram
+	value       metric.Float64Histogram
 
 	counters *droppedCounters
 
@@ -170,6 +171,13 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		metric.WithExplicitBucketBoundaries(measureBucketsMs...),
 	)
 
+	value, _ := meter.Float64Histogram(
+		MetricValue,
+		metric.WithUnit("1"),
+		metric.WithDescription("Vendor-defined per-run value."),
+		metric.WithExplicitBucketBoundaries(valueBuckets...),
+	)
+
 	c := &Client{
 		tier:            tier,
 		tp:              tp,
@@ -187,6 +195,7 @@ func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, er
 		errorEvents:     errorEvents,
 		counter:         counter,
 		measure:         measure,
+		value:           value,
 		counters:        &droppedCounters{},
 		jobs:            make(chan func(), cfg.queueSize),
 		stopCh:          make(chan struct{}),
