@@ -285,12 +285,44 @@ func (c *Client) identityAttrs(sessionID string) []attribute.KeyValue {
 		attrs = append(attrs, attribute.String(AttrSessionID, sessionID))
 	}
 	if c.tier.Allows(TierBasic) {
-		c.installOnce.Do(func() { c.installID = loadOrCreateInstallID(c.installIDPath) })
-		if c.installID != "" {
-			attrs = append(attrs, attribute.String(AttrInstallID, c.installID))
+		if id := c.loadInstallID(); id != "" {
+			attrs = append(attrs, attribute.String(AttrInstallID, id))
 		}
 	}
 	return attrs
+}
+
+// loadInstallID reads or creates the install ID once and publishes it for
+// metricInstallAttr. It may touch the file system: call it from dispatch.
+func (c *Client) loadInstallID() string {
+	c.installOnce.Do(func() {
+		c.installID = loadOrCreateInstallID(c.installIDPath)
+		id := c.installID
+		c.installIDReady.Store(&id)
+	})
+	return c.installID
+}
+
+// metricInstallAttrs returns the install ID attribute for a vendor metric
+// data point (counter, duration, value), so the server can count the
+// installs a metric reached: only at TierBasic and above, and only once the
+// ID is loaded. Loading it is never done here, on the caller's goroutine: the
+// first call asks the background worker to, so data points recorded before it
+// finishes go without it, which the server reports as lower coverage.
+func (c *Client) metricInstallAttrs() []attribute.KeyValue {
+	if !c.tier.Allows(TierBasic) {
+		return nil
+	}
+	if p := c.installIDReady.Load(); p != nil {
+		if *p == "" {
+			return nil
+		}
+		return []attribute.KeyValue{attribute.String(AttrInstallID, *p)}
+	}
+	if c.installLoading.CompareAndSwap(false, true) {
+		c.dispatch(func() { c.loadInstallID() })
+	}
+	return nil
 }
 
 // RecordSessionStart records the start of a CLI process session, which

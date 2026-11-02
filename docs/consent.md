@@ -287,7 +287,9 @@ What is sent, per distinct counter name, label and command:
 | the value | Anonymous | a monotonic sum, unit `1` |
 | `cli.version`, `cli.os`, `cli.arch`, `cli.is_ci` | Anonymous | the resource attributes every signal carries |
 
-No session or install ID is attached, at any tier. A name or label that does
+No session ID is attached, at any tier. At `Basic` and above the install
+ID (`cli.install_id`) is, so the server can count the installs a metric
+reached; below `Basic` it never is. A name or label that does
 not match the pattern, or is longer than 64 bytes, is dropped along with its
 counter rather than scrubbed or truncated; a non-positive increment is
 ignored. Increments are summed in memory and sent as one data point per name
@@ -314,7 +316,9 @@ What is sent, per distinct measure name, label and command:
 | the value | Anonymous | a histogram of durations, unit `ms`, with fixed bucket boundaries (1, 5, 10, 50, 100, 500, 1000, 5000, 10000, 60000, 300000) |
 | `cli.version`, `cli.os`, `cli.arch`, `cli.is_ci` | Anonymous | the resource attributes every signal carries |
 
-No session or install ID is attached, at any tier. A name or label that does
+No session ID is attached, at any tier. At `Basic` and above the install
+ID (`cli.install_id`) is, so the server can count the installs a metric
+reached; below `Basic` it never is. A name or label that does
 not match the pattern, or is longer than 64 bytes, is dropped along with its
 measure rather than scrubbed or truncated; a non-positive duration is
 ignored. Durations are aggregated in memory and sent as one data point per

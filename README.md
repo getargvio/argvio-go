@@ -164,7 +164,7 @@ label that is not `^[a-z0-9][a-z0-9._-]*$` or is over 64 bytes, is dropped
 > go out as-is, so they must be fixed identifiers chosen in code, **never
 > user input, file paths, host names, URLs, tokens or anything derived from
 > them.** What is sent: the name, the label, the command name, and the usual
-> CLI version, OS, architecture and CI flag; no session or install ID. See
+> CLI version, OS, architecture and CI flag; no session ID, and the install ID only at `Basic` and above (for reach). See
 > [docs/consent.md](docs/consent.md#product-counters-are-accepted-at-the-anonymous-tier).
 
 ### Counters with dimensions
@@ -218,8 +218,8 @@ non-positive duration, or a name or label that is not
 > counters: the name and label go out as-is, so they must be fixed identifiers
 > chosen in code, **never user input, file paths, host names, URLs, tokens or
 > anything derived from them.** What is sent: the name, the label, the command
-> name, and the usual CLI version, OS, architecture and CI flag; no session or
-> install ID. See
+> name, and the usual CLI version, OS, architecture and CI flag; no session ID, and the install
+> ID only at `Basic` and above (for reach). See
 > [docs/consent.md](docs/consent.md#product-durations-are-accepted-at-the-anonymous-tier).
 
 ## Pointing at a collector

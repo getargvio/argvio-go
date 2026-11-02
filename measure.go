@@ -39,8 +39,9 @@ func WithMeasureLabel(label string) MeasureOption {
 // The cli.measure histogram (milliseconds), with name (AttrMeasureName), the
 // optional label (AttrMeasureLabel), the name of the command last passed to
 // RecordCommandInvocation when there was one, and the CLI version, OS,
-// architecture and CI flag every metric carries. It carries no session or
-// install ID. Measures are accepted at EVERY tier, including TierAnonymous,
+// architecture and CI flag every metric carries. It carries no session
+// ID, and, at TierBasic and above, the install ID (AttrInstallID), so the
+// server can count the installs a metric reached. Measures are accepted at EVERY tier, including TierAnonymous,
 // so they are also reported from CI and when the user has granted no consent.
 //
 // # WARNING: names and labels are sent as-is
@@ -70,6 +71,7 @@ func (c *Client) RecordDuration(ctx context.Context, name string, d time.Duratio
 	}
 	attrs := make([]attribute.KeyValue, 0, 4)
 	attrs = append(attrs, c.tierAttr(), attribute.String(AttrMeasureName, name))
+	attrs = append(attrs, c.metricInstallAttrs()...)
 	if cfg.label != "" {
 		if !validIdentifier(cfg.label) {
 			return
