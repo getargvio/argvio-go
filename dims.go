@@ -18,6 +18,7 @@ type MetricOption func(*metricConfig)
 
 type metricConfig struct {
 	dims []string
+	unit Unit
 }
 
 // Dims declares the dimension keys of a Counter or Duration handle, in the

@@ -184,6 +184,22 @@ as above: keys and values are sent at the anonymous tier and must be fixed
 identifiers from code. See
 [docs/consent.md](docs/consent.md#dimensions-are-accepted-at-the-anonymous-tier).
 
+### Per-run values
+
+```go
+perScan := client.Value("scan.findings", argvio.Dims("severity"))
+perScan.Record(ctx, float64(found[sev]), sev) // once per run, zeros included
+
+client.Value("spec.size", argvio.WithUnit(argvio.UnitBytes)).Record(ctx, float64(len(spec)))
+```
+
+A quantity recorded once per run, such as findings per scan or operations
+scanned, is sent as the `cli.value` histogram, so the server keeps its
+distribution: percentiles, mean and the share of runs that recorded more
+than zero. **Record zeros**: a run that records nothing isn't counted at all.
+Units are `UnitCount` (default), `UnitBytes` and `UnitPercent`. Values must be
+finite and not negative. Same anonymous-tier warning as counters.
+
 ## Product durations
 
 ```go

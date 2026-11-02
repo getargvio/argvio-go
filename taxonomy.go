@@ -55,6 +55,11 @@ const (
 	AttrMeasureName  = "cli.measure.name"
 	AttrMeasureLabel = "cli.measure.label"
 
+	// Vendor-defined per-run values on the cli.value metric, accepted at
+	// every tier including TierAnonymous. See Client.Value.
+	AttrValueName = "cli.value.name"
+	AttrValueUnit = "cli.value.unit"
+
 	// AttrDimPrefix starts the dimension attributes of a cli.counter or
 	// cli.measure data point, one per key declared with Dims:
 	// "cli.dim.severity". Accepted at every tier. See Client.Counter.
@@ -109,6 +114,7 @@ const (
 	MetricErrors             = "cli.errors"
 	MetricCounter            = "cli.counter"
 	MetricMeasure            = "cli.measure" // milliseconds
+	MetricValue              = "cli.value"   // per-run quantity, unit in AttrValueUnit
 )
 
 // maxCommandNameLength is the server's max_length for cli.command.name.
