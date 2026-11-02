@@ -44,6 +44,10 @@ type Client struct {
 
 	installOnce sync.Once
 	installID   string
+	// installIDReady holds installID once loaded, for the metric calls,
+	// which run on the caller's goroutine and must not touch the file.
+	installIDReady atomic.Pointer[string]
+	installLoading atomic.Bool
 
 	latencyHist metric.Float64Histogram
 	invocations metric.Int64Counter

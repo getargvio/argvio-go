@@ -80,6 +80,7 @@ func (h metricHandle) attrs(nameAttr string, values []string) (attrs []attribute
 	if p := h.c.currentCommand.Load(); p != nil {
 		attrs = append(attrs, attribute.String(AttrCommandName, *p))
 	}
+	attrs = append(attrs, h.c.metricInstallAttrs()...)
 	return attrs, true
 }
 

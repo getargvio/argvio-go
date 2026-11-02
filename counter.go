@@ -32,8 +32,9 @@ func WithLabel(label string) CounterOption {
 // The cli.counter metric, with name (AttrCounterName), the optional label
 // (AttrCounterLabel), the name of the command last passed to
 // RecordCommandInvocation when there was one, and the CLI version, OS,
-// architecture and CI flag every metric carries. It carries no session or
-// install ID. Counters are accepted at EVERY tier, including TierAnonymous,
+// architecture and CI flag every metric carries. It carries no session
+// ID, and, at TierBasic and above, the install ID (AttrInstallID), so the
+// server can count the installs a metric reached. Counters are accepted at EVERY tier, including TierAnonymous,
 // so they are also reported from CI and when the user has granted no consent.
 //
 // # WARNING: names and labels are sent as-is
@@ -63,6 +64,7 @@ func (c *Client) RecordCounter(ctx context.Context, name string, n int64, opts .
 	}
 	attrs := make([]attribute.KeyValue, 0, 4)
 	attrs = append(attrs, c.tierAttr(), attribute.String(AttrCounterName, name))
+	attrs = append(attrs, c.metricInstallAttrs()...)
 	if cfg.label != "" {
 		if !validIdentifier(cfg.label) {
 			return

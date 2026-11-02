@@ -175,7 +175,9 @@ func TestRecordDurationIsSentAtEveryTier(t *testing.T) {
 	}
 }
 
-func TestRecordDurationCarriesNoIdentifiers(t *testing.T) {
+// Vendor metrics never carry a session ID; the install ID is covered by
+// TestVendorMetricsCarryInstallIDAtBasic.
+func TestRecordDurationCarriesNoSessionID(t *testing.T) {
 	c, srv := newTestClient(t, TierOptIn)
 	c.RecordCommandInvocation(context.Background(), "testcli sub", nil)
 	c.RecordDuration(context.Background(), "ok", time.Second)
@@ -190,10 +192,8 @@ func TestRecordDurationCarriesNoIdentifiers(t *testing.T) {
 				}
 				found = true
 				for _, dp := range m.GetHistogram().GetDataPoints() {
-					for _, key := range []string{AttrSessionID, AttrInstallID} {
-						if fakeotlp.Attr(dp.GetAttributes(), key) != nil {
-							t.Errorf("measure must not carry %s", key)
-						}
+					if fakeotlp.Attr(dp.GetAttributes(), AttrSessionID) != nil {
+						t.Errorf("measure must not carry %s", AttrSessionID)
 					}
 					want := measureBucketsMs
 					got := dp.GetExplicitBounds()

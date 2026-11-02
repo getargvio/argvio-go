@@ -197,7 +197,9 @@ func TestRecordCounterIsSentAtEveryTier(t *testing.T) {
 	}
 }
 
-func TestRecordCounterCarriesNoIdentifiers(t *testing.T) {
+// Vendor metrics never carry a session ID; the install ID is covered by
+// TestVendorMetricsCarryInstallIDAtBasic.
+func TestRecordCounterCarriesNoSessionID(t *testing.T) {
 	c, srv := newTestClient(t, TierOptIn)
 	c.RecordCommandInvocation(context.Background(), "testcli sub", nil)
 	c.RecordCounter(context.Background(), "ok", 1)
@@ -210,10 +212,8 @@ func TestRecordCounterCarriesNoIdentifiers(t *testing.T) {
 					continue
 				}
 				for _, dp := range m.GetSum().GetDataPoints() {
-					for _, key := range []string{AttrSessionID, AttrInstallID} {
-						if fakeotlp.Attr(dp.GetAttributes(), key) != nil {
-							t.Errorf("counter must not carry %s", key)
-						}
+					if fakeotlp.Attr(dp.GetAttributes(), AttrSessionID) != nil {
+						t.Errorf("counter must not carry %s", AttrSessionID)
 					}
 				}
 				if !m.GetSum().GetIsMonotonic() {
