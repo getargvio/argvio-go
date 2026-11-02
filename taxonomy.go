@@ -55,6 +55,11 @@ const (
 	AttrMeasureName  = "cli.measure.name"
 	AttrMeasureLabel = "cli.measure.label"
 
+	// AttrDimPrefix starts the dimension attributes of a cli.counter or
+	// cli.measure data point, one per key declared with Dims:
+	// "cli.dim.severity". Accepted at every tier. See Client.Counter.
+	AttrDimPrefix = "cli.dim."
+
 	// Process-wide resource usage on the command span, omitted where the
 	// platform can't measure it. See RecordCommand.
 	AttrPeakRSSBytes = "cli.process.peak_rss_bytes" // TierBasic+, bytes

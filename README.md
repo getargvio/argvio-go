@@ -96,7 +96,7 @@ and is shaped by the tier the current session resolved to:
 
 | Tier | Adds |
 |---|---|
-| `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters and durations (`RecordCounter`, `RecordDuration`, see below) |
+| `Anonymous` (default) | aggregate invocation/session/exit counts only, no identifiers; vendor product counters and durations (`RecordCounter`, `RecordDuration`, `Client.Counter`, `Client.Duration`, see below) |
 | `Basic` | command path, flag names, session and install IDs, error types and reasons, feature activations, process resource usage, binary size and startup overhead, shell, terminal, stdout TTY and Go runtime version, config customization count and auth state, when you report them |
 | `Full` | reserved: nothing beyond `Basic` in this SDK |
 | `Opt-in+` | raw error messages and stack traces, via `Client.OptIn()` only |
@@ -166,6 +166,23 @@ label that is not `^[a-z0-9][a-z0-9._-]*$` or is over 64 bytes, is dropped
 > them.** What is sent: the name, the label, the command name, and the usual
 > CLI version, OS, architecture and CI flag; no session or install ID. See
 > [docs/consent.md](docs/consent.md#product-counters-are-accepted-at-the-anonymous-tier).
+
+### Counters with dimensions
+
+```go
+vulns := client.Counter("vulns.found", argvio.Dims("severity", "check"))
+vulns.Add(ctx, 1, "high", "bola")
+```
+
+When one label isn't enough, declare a handle once with up to three named
+dimensions (`MaxDims`) and pass one value per key, in the same order, on each
+call. Each is sent as a `cli.dim.<key>` attribute; the server breaks the
+counter down by any of them. A call with the wrong number of values, or an
+invalid one, is dropped. `client.Duration("scan.run", argvio.Dims("target"))`
+does the same for durations, with `Record(ctx, d, values...)`. Same warning
+as above: keys and values are sent at the anonymous tier and must be fixed
+identifiers from code. See
+[docs/consent.md](docs/consent.md#dimensions-are-accepted-at-the-anonymous-tier).
 
 ## Product durations
 
