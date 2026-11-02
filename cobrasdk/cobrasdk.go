@@ -108,6 +108,7 @@ type hookConfig struct {
 	captureHelp    bool
 	captureRunE    bool
 	captureUnknown bool
+	capturePanics  bool
 }
 
 // classify returns the category and reason for err, calling the vendor's
@@ -129,6 +130,22 @@ func (c *hookConfig) classify(err error) (argvio.ErrorCategory, string) {
 
 // HookOption configures InstrumentCobra.
 type HookOption func(*hookConfig)
+
+// panicExitCode is the exit code recorded for a command that panicked: the
+// one the Go runtime exits with after an unrecovered panic.
+const panicExitCode = 2
+
+// panicReason is the fixed reason recorded with a panic. The panic value and
+// stack are never sent, as they can contain user input.
+const panicReason = "panic"
+
+// panicFlushTimeout bounds the flush done before a panic is re-raised, so a
+// crash is never held up for long by an unreachable collector.
+const panicFlushTimeout = 2 * time.Second
+
+// errPanic stands in for the error of a command that panicked. It carries no
+// part of the panic value.
+var errPanic = errors.New("cobrasdk: command panicked")
 
 // WithErrorClassifier supplies a function that maps an error returned
 // by a command's RunE to an argvio.ErrorCategory. Without this option,
@@ -194,6 +211,18 @@ func WithoutRunCapture() HookOption {
 	return func(c *hookConfig) { c.captureRunE = false }
 }
 
+// WithoutPanicCapture disables the recording of a command that panics, which
+// InstrumentCobra otherwise does while it wraps RunE. By default a panic in a
+// command is recorded as a failed command with exit code 2 and an error of
+// category argvio.ErrorCategoryInternal and reason "panic", the client is
+// flushed, and the original panic is raised again, so the host CLI keeps its
+// crash output and exit code. Use this option if your CLI recovers panics
+// itself and records them its own way. It has no effect with
+// WithoutRunCapture.
+func WithoutPanicCapture() HookOption {
+	return func(c *hookConfig) { c.capturePanics = false }
+}
+
 // WithoutUnknownCommandCapture disables the recording of unknown-command
 // attempts that InstrumentCobra otherwise does from the help func, for
 // parents that have subcommands but no Run of their own. It does not affect
@@ -211,6 +240,11 @@ func WithoutUnknownCommandCapture() HookOption {
 //     RecordError) are captured by wrapping RunE (or Run) on every
 //     command in the tree that has one, at the time InstrumentCobra is
 //     called — subcommands added to the tree afterward are not wrapped.
+//   - A panic in a command's RunE or Run is recorded as an internal error
+//     with reason "panic" and exit code 2, the client is flushed, and the
+//     panic is raised again unchanged (see WithoutPanicCapture). The panic
+//     value and stack are never sent. A panic in a goroutine the command
+//     starts cannot be seen.
 //   - Help usage (see RecordHelpFlagUsage) is captured via
 //     Command.SetHelpFunc.
 //   - A mistyped subcommand of a parent that has no Run of its own (see
@@ -232,7 +266,7 @@ func InstrumentCobra(root *cobra.Command, client *argvio.Client, opts ...HookOpt
 	if root == nil {
 		return
 	}
-	cfg := &hookConfig{captureHelp: true, captureRunE: true, captureUnknown: true}
+	cfg := &hookConfig{captureHelp: true, captureRunE: true, captureUnknown: true, capturePanics: true}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)
@@ -463,6 +497,7 @@ func wrapRunE(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig) {
 	case cmd.RunE != nil:
 		inner := cmd.RunE
 		cmd.RunE = func(c *cobra.Command, args []string) error {
+			defer recordPanic(c, client, cfg)
 			err := inner(c, args)
 			code := 0
 			if err != nil {
@@ -474,12 +509,39 @@ func wrapRunE(cmd *cobra.Command, client *argvio.Client, cfg *hookConfig) {
 	case cmd.Run != nil:
 		inner := cmd.Run
 		cmd.RunE = func(c *cobra.Command, args []string) error {
+			defer recordPanic(c, client, cfg)
 			inner(c, args)
 			recordOutcome(c, client, cfg, nil, 0)
 			return nil
 		}
 		cmd.Run = nil
 	}
+}
+
+// recordPanic is deferred around a command's run function. If the command is
+// panicking it records the failure, flushes the client and raises the same
+// panic again; otherwise it does nothing. It must be deferred directly, as
+// recover only works there.
+func recordPanic(c *cobra.Command, client *argvio.Client, cfg *hookConfig) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if cfg.capturePanics {
+		func() {
+			// Whatever goes wrong while recording, the original panic must
+			// still be raised.
+			defer func() { _ = recover() }()
+			panicCfg := &hookConfig{both: func(error) (argvio.ErrorCategory, string) {
+				return argvio.ErrorCategoryInternal, panicReason
+			}}
+			recordOutcome(c, client, panicCfg, errPanic, panicExitCode)
+			ctx, cancel := context.WithTimeout(context.Background(), panicFlushTimeout)
+			defer cancel()
+			_ = client.Shutdown(ctx)
+		}()
+	}
+	panic(r)
 }
 
 // RecordExit records cmd as having finished with the given exit code, for

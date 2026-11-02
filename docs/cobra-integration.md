@@ -171,6 +171,21 @@ cobrasdk.InstrumentCobra(rootCmd, client,
 - **`WithoutRunCapture()`** — skip the recursive `RunE` wrapping, if you
   want to call `RecordExitCode`/`RecordLatency`/`RecordError` yourself
   (e.g. to record the real OS exit code — see above).
+- **`WithoutPanicCapture()`** — don't record a command that panics, if your
+  CLI recovers panics itself. See [Panics](#panics).
+
+## Panics
+
+A panic in a command's `RunE` or `Run` is recorded as a failed command with
+exit code `2` (what the Go runtime exits with) and an error of category
+`internal` with reason `panic`. The client is then flushed (bounded to 2
+seconds) and the original panic is raised again, so your CLI keeps its crash
+output and exit code. A later `client.Shutdown` in `main` is harmless.
+
+The panic value and stack are never sent, as they can contain what the user
+typed. Panics in goroutines a command starts cannot be seen, and a panic in
+a `PersistentPreRunE` or other hook, outside `RunE`, is not captured. Pass
+`WithoutPanicCapture()` to turn this off.
 
 ## Unknown commands
 
