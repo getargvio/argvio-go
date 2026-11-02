@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -545,5 +547,107 @@ func TestNilClassifierOptionsAreIgnored(t *testing.T) {
 	})
 	if got := errorType(t, srv); got != string(argvio.ErrorCategoryUnknown) {
 		t.Fatalf("category = %q, want unknown", got)
+	}
+}
+
+// runPanicking executes root and returns what its panic value was, or nil if
+// it did not panic.
+func runPanicking(t *testing.T, root *cobra.Command, args ...string) (recovered any) {
+	t.Helper()
+	root.SetArgs(args)
+	root.SetOut(&bytes.Buffer{})
+	root.SilenceErrors = true
+	root.SilenceUsage = true
+	defer func() { recovered = recover() }()
+	_ = root.Execute()
+	return nil
+}
+
+func exportDump(srv *fakeotlp.Server) string {
+	return fmt.Sprintf("%v %v", srv.Logs(), srv.Traces())
+}
+
+func TestInstrumentCobraRecordsPanicAndRepanics(t *testing.T) {
+	const typed = "user-typed-input-value"
+	client, srv := newTestClient(t, argvio.TierBasic)
+	boom := errors.New(typed)
+	root := newSampleCLI(func(*cobra.Command, []string) error { panic(boom) })
+	InstrumentCobra(root, client)
+
+	// The test never calls Flush or Shutdown: the panic path must do it.
+	if got := runPanicking(t, root, "sub"); got != boom {
+		t.Fatalf("recovered %v, want the original panic value", got)
+	}
+
+	span := srv.Span(argvio.SpanCommandPrefix + "sub")
+	if span == nil {
+		t.Fatal("expected a cli.command.sub span for the panicking command")
+	}
+	if code := fakeotlp.Attr(span.GetAttributes(), argvio.AttrExitCode).GetIntValue(); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !hasEvent(srv, argvio.EventCommandCompleted) {
+		t.Fatal("expected a cli.command.completed event")
+	}
+	if got, ok := eventAttr(srv, argvio.EventErrorRaised, argvio.AttrErrorType); !ok || got != string(argvio.ErrorCategoryInternal) {
+		t.Fatalf("error type = (%q, %v), want %q", got, ok, argvio.ErrorCategoryInternal)
+	}
+	if got, ok := errorReason(srv); !ok || got != "panic" {
+		t.Fatalf("error reason = (%q, %v), want panic", got, ok)
+	}
+	if strings.Contains(exportDump(srv), typed) {
+		t.Fatal("the panic value leaked into the exported telemetry")
+	}
+}
+
+func TestInstrumentCobraRecordsPanicInRun(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierBasic)
+	root := &cobra.Command{Use: "samplecli", Version: "9.9.9"}
+	root.AddCommand(&cobra.Command{Use: "sub", Run: func(*cobra.Command, []string) { panic("boom") }})
+	InstrumentCobra(root, client)
+
+	if got := runPanicking(t, root, "sub"); got != "boom" {
+		t.Fatalf("recovered %v, want boom", got)
+	}
+	if got, ok := errorReason(srv); !ok || got != "panic" {
+		t.Fatalf("error reason = (%q, %v), want panic", got, ok)
+	}
+}
+
+func TestInstrumentCobraPanicIgnoresClassifier(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierBasic)
+	root := newSampleCLI(func(*cobra.Command, []string) error { panic("boom") })
+	InstrumentCobra(root, client, WithErrorClassification(func(error) (argvio.ErrorCategory, string) {
+		return argvio.ErrorCategoryNetwork, "vendor-reason"
+	}))
+
+	runPanicking(t, root, "sub")
+	if got, _ := eventAttr(srv, argvio.EventErrorRaised, argvio.AttrErrorType); got != string(argvio.ErrorCategoryInternal) {
+		t.Fatalf("error type = %q, want internal", got)
+	}
+	if got, _ := errorReason(srv); got != "panic" {
+		t.Fatalf("error reason = %q, want panic", got)
+	}
+}
+
+func TestWithoutPanicCaptureRecordsNothingAndStillPanics(t *testing.T) {
+	client, srv := newTestClient(t, argvio.TierBasic)
+	root := newSampleCLI(func(*cobra.Command, []string) error { panic("boom") })
+	InstrumentCobra(root, client, WithoutPanicCapture())
+
+	if got := runPanicking(t, root, "sub"); got != "boom" {
+		t.Fatalf("recovered %v, want boom", got)
+	}
+	flush(t, client)
+	if hasEvent(srv, argvio.EventCommandCompleted) || hasEvent(srv, argvio.EventErrorRaised) {
+		t.Fatal("expected nothing recorded for the command with WithoutPanicCapture")
+	}
+}
+
+func TestPanicCaptureWithNilClient(t *testing.T) {
+	root := newSampleCLI(func(*cobra.Command, []string) error { panic("boom") })
+	InstrumentCobra(root, nil)
+	if got := runPanicking(t, root, "sub"); got != "boom" {
+		t.Fatalf("recovered %v, want boom", got)
 	}
 }
