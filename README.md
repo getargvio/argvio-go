@@ -200,6 +200,43 @@ than zero. **Record zeros**: a run that records nothing isn't counted at all.
 Units are `UnitCount` (default), `UnitBytes` and `UnitPercent`. Values must be
 finite and not negative. Same anonymous-tier warning as counters.
 
+### Package-level metrics
+
+```go
+var vulnsFound = argvio.NewCounter("vulns.found", argvio.Dims("severity", "check"))
+var scanTime   = argvio.NewDuration("scan.time", argvio.Dims("kind"))
+var opsInSpec  = argvio.NewValue("spec.operations", argvio.WithUnit(argvio.UnitCount))
+
+vulnsFound.Add(ctx, 1, "high", "bola")
+defer scanTime.Start(ctx, "openapi")()
+opsInSpec.Record(ctx, float64(len(spec.Operations)))
+```
+
+`NewCounter`, `NewDuration` and `NewValue` return the same handles as
+`client.Counter`, `client.Duration` and `client.Value`, but not tied to a
+client: they record on the default one, looked up on every call. They can be
+declared at package level before `argvio.New` runs, and are safe for
+concurrent use.
+
+- `argvio.New` registers the client it returns as the default, replacing any
+  earlier one. Pass `argvio.WithoutDefault()` in a library, or when a program
+  has several clients. `argvio.SetDefault(c)` sets it by hand (handy in
+  tests; `SetDefault(nil)` clears it), and `argvio.Default()` returns it.
+- With no default client, a disabled or shut down one, or a nil handle,
+  every call does nothing. An invalid call is dropped: same rules as
+  `client.Counter`, never a panic or an error.
+- On a `Duration`, `Start(ctx, values...)` returns a function that records the
+  time elapsed since `Start`, so it can be deferred; `StartLate(ctx)` returns
+  a `func(values ...string)` for dimension values only known at the end:
+
+  ```go
+  done := scanTime.StartLate(ctx)
+  err := scan()
+  done(outcome(err))
+  ```
+
+  Both work on handles from `client.Duration` too, and record at most once.
+
 ## Product durations
 
 ```go

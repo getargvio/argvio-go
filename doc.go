@@ -12,6 +12,10 @@
 // into a github.com/spf13/cobra CLI (the cobrasdk subpackage) with a
 // single call.
 //
+// Product metrics can also be declared at package level, before a Client
+// exists, with NewCounter, NewDuration and NewValue: they record on the
+// default Client, which New registers (see SetDefault and WithoutDefault).
+//
 // Every exported method on Client is safe to call on a nil receiver and
 // never panics — a bug in this package should never crash a CLI that
 // embeds it.

@@ -32,6 +32,8 @@ func newTestClient(t *testing.T, tier Tier, opts ...Option) (*Client, *fakeotlp.
 		WithInstallIDPath(filepath.Join(t.TempDir(), "install-id")),
 	}, opts...)
 
+	prev := Default()
+	t.Cleanup(func() { SetDefault(prev) })
 	c, err := New("test-api-key", "testcli", "1.2.3", allOpts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
