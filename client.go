@@ -84,14 +84,26 @@ type Client struct {
 // returns a Client already degraded to disabled no-op mode alongside a
 // non-nil error describing why — callers may log the error but are not
 // required to check it before using the returned Client safely.
+//
+// Unless WithoutDefault is passed, the returned Client also becomes the
+// default one that package-level handles (NewCounter, NewDuration, NewValue)
+// record on, replacing any earlier default.
 func New(apiKey, cliName, cliVersion string, opts ...Option) (client *Client, err error) {
+	var cfg *config
+	// Registered first so it runs last, after the recover below has set the
+	// degraded client.
+	defer func() {
+		if cfg != nil && !cfg.noDefault {
+			SetDefault(client)
+		}
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			client, err = disabledClient(), errRecoveredPanic
 		}
 	}()
 
-	cfg := newConfig(apiKey, cliName, cliVersion)
+	cfg = newConfig(apiKey, cliName, cliVersion)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)

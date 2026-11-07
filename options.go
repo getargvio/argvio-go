@@ -24,6 +24,7 @@ type config struct {
 	useHTTP     bool
 	insecure    bool
 	disabled    bool
+	noDefault   bool
 	defaultTier Tier
 	consent     ConsentProvider
 

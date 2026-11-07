@@ -2,6 +2,7 @@ package argvio
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -35,10 +36,22 @@ func Dims(keys ...string) MetricOption {
 // metricHandle is what Counter and Duration share: a name and dimension keys
 // validated once, when the handle is made.
 type metricHandle struct {
-	c     *Client
+	c *Client
+	// lazy handles (NewCounter, NewDuration, NewValue) ignore c and use the
+	// default client, resolved on every call, so they follow SetDefault.
+	lazy  bool
 	name  string
 	keys  []attribute.Key
 	valid bool
+}
+
+// client is the Client a call is recorded on: the fixed one the handle was
+// made with, or for a lazy handle the current default, which may be nil.
+func (h metricHandle) client() *Client {
+	if h.lazy {
+		return defaultClient.Load()
+	}
+	return h.c
 }
 
 func newMetricHandle(c *Client, name string, opts []MetricOption) metricHandle {
@@ -65,22 +78,22 @@ func newMetricHandle(c *Client, name string, opts []MetricOption) metricHandle {
 // call must be dropped: an invalid handle, a value count that doesn't match
 // the keys, or an invalid value. A value is never sent as something else, so
 // a bad one can't silently merge into another series.
-func (h metricHandle) attrs(nameAttr string, values []string) (attrs []attribute.KeyValue, ok bool) {
+func (h metricHandle) attrs(c *Client, nameAttr string, values []string) (attrs []attribute.KeyValue, ok bool) {
 	if !h.valid || len(values) != len(h.keys) {
 		return nil, false
 	}
 	attrs = make([]attribute.KeyValue, 0, 3+len(h.keys))
-	attrs = append(attrs, h.c.tierAttr(), attribute.String(nameAttr, h.name))
+	attrs = append(attrs, c.tierAttr(), attribute.String(nameAttr, h.name))
 	for i, v := range values {
 		if !validIdentifier(v) {
 			return nil, false
 		}
 		attrs = append(attrs, h.keys[i].String(v))
 	}
-	if p := h.c.currentCommand.Load(); p != nil {
+	if p := c.currentCommand.Load(); p != nil {
 		attrs = append(attrs, attribute.String(AttrCommandName, *p))
 	}
-	attrs = append(attrs, h.c.metricInstallAttrs()...)
+	attrs = append(attrs, c.metricInstallAttrs()...)
 	return attrs, true
 }
 
@@ -120,14 +133,18 @@ func (c *Client) Counter(name string, opts ...MetricOption) *Counter {
 // CLI.
 func (k *Counter) Add(ctx context.Context, n int64, values ...string) {
 	defer recoverGuard(nil)
-	if k == nil || k.h.c == nil || n <= 0 || !k.h.c.gate(TierAnonymous) || k.h.c.counter == nil {
+	if k == nil || n <= 0 {
 		return
 	}
-	attrs, ok := k.h.attrs(AttrCounterName, values)
+	c := k.h.client()
+	if c == nil || !c.gate(TierAnonymous) || c.counter == nil {
+		return
+	}
+	attrs, ok := k.h.attrs(c, AttrCounterName, values)
 	if !ok {
 		return
 	}
-	k.h.c.counter.Add(ctx, n, metric.WithAttributes(attrs...))
+	c.counter.Add(ctx, n, metric.WithAttributes(attrs...))
 }
 
 // Duration is a vendor-defined duration with named dimensions, made once by
@@ -156,12 +173,57 @@ func (c *Client) Duration(name string, opts ...MetricOption) *Duration {
 // an invalid one is dropped. Never blocks or panics into the host CLI.
 func (m *Duration) Record(ctx context.Context, d time.Duration, values ...string) {
 	defer recoverGuard(nil)
-	if m == nil || m.h.c == nil || d <= 0 || !m.h.c.gate(TierAnonymous) || m.h.c.measure == nil {
+	if m == nil || d <= 0 {
 		return
 	}
-	attrs, ok := m.h.attrs(AttrMeasureName, values)
+	c := m.h.client()
+	if c == nil || !c.gate(TierAnonymous) || c.measure == nil {
+		return
+	}
+	attrs, ok := m.h.attrs(c, AttrMeasureName, values)
 	if !ok {
 		return
 	}
-	m.h.c.measure.Record(ctx, float64(d)/float64(time.Millisecond), metric.WithAttributes(attrs...))
+	c.measure.Record(ctx, float64(d)/float64(time.Millisecond), metric.WithAttributes(attrs...))
+}
+
+// Start starts a timer and returns the function that stops it: calling that
+// function records the time elapsed since Start, with the given dimension
+// values, as Record does. It is meant to be deferred:
+//
+//	defer scanTime.Start(ctx, "openapi")()
+//
+// The returned function is never nil, even on a nil handle, and records only
+// the first time it is called.
+func (m *Duration) Start(ctx context.Context, values ...string) func() {
+	if m == nil {
+		return func() {}
+	}
+	start := time.Now()
+	values = append([]string(nil), values...)
+	var once sync.Once
+	return func() {
+		once.Do(func() { m.Record(ctx, time.Since(start), values...) })
+	}
+}
+
+// StartLate is Start for dimension values only known at the end, such as an
+// outcome: the returned function takes them and records the time elapsed
+// since StartLate:
+//
+//	done := scanTime.StartLate(ctx)
+//	res, err := scan()
+//	done(outcome(err))
+//
+// The returned function is never nil, even on a nil handle, and records only
+// the first time it is called.
+func (m *Duration) StartLate(ctx context.Context) func(values ...string) {
+	if m == nil {
+		return func(...string) {}
+	}
+	start := time.Now()
+	var once sync.Once
+	return func(values ...string) {
+		once.Do(func() { m.Record(ctx, time.Since(start), values...) })
+	}
 }

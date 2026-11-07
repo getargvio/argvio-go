@@ -64,6 +64,10 @@ type Value struct {
 // Client.Counter: names, keys and values must be fixed identifiers from
 // code, never user input.
 func (c *Client) Value(name string, opts ...MetricOption) *Value {
+	return newValue(c, name, opts)
+}
+
+func newValue(c *Client, name string, opts []MetricOption) *Value {
 	var cfg metricConfig
 	for _, opt := range opts {
 		if opt != nil {
@@ -87,13 +91,17 @@ func (c *Client) Value(name string, opts ...MetricOption) *Value {
 // or an invalid one is dropped. Never blocks or panics into the host CLI.
 func (m *Value) Record(ctx context.Context, v float64, values ...string) {
 	defer recoverGuard(nil)
-	if m == nil || m.h.c == nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) || !m.h.c.gate(TierAnonymous) || m.h.c.value == nil {
+	if m == nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
 		return
 	}
-	attrs, ok := m.h.attrs(AttrValueName, values)
+	c := m.h.client()
+	if c == nil || !c.gate(TierAnonymous) || c.value == nil {
+		return
+	}
+	attrs, ok := m.h.attrs(c, AttrValueName, values)
 	if !ok {
 		return
 	}
 	attrs = append(attrs, attribute.String(AttrValueUnit, string(m.unit)))
-	m.h.c.value.Record(ctx, v, metric.WithAttributes(attrs...))
+	c.value.Record(ctx, v, metric.WithAttributes(attrs...))
 }
